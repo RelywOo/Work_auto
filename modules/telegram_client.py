@@ -63,7 +63,7 @@ class TelegramClientManager:
             
             self.logger.info("Searching for 10 latest UA/UB topics...")
             
-            while len(collected_topics) < 10:
+            while len(collected_topics) < 7:
                 from telethon.tl.functions.messages import GetForumTopicsRequest
                 result = await self.client(GetForumTopicsRequest(
                     peer=chat,
@@ -92,10 +92,10 @@ class TelegramClientManager:
                         # Пишем в лог, что мы нашли подходящий топик!
                         self.logger.info(f"✅ Найден топик: {topic.title} (ID: {topic.id})")
                         
-                        if len(collected_topics) == 10:
+                        if len(collected_topics) == 7:
                             break
                             
-                if len(collected_topics) == 10:
+                if len(collected_topics) == 7:
                     break
                 
                 if getattr(result, 'messages', []):
