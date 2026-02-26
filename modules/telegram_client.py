@@ -1,11 +1,9 @@
 import os
 import asyncio
-import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any
 from telethon import TelegramClient
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-from telethon.errors import FloodWaitError, ChatAdminRequiredError, SessionPasswordNeededError
-from datetime import datetime, timedelta 
+from telethon.tl.types import MessageMediaPhoto
+from telethon.errors import FloodWaitError, SessionPasswordNeededError
 import logging
 from telethon.tl.functions.messages import GetForumTopicsRequest
 
@@ -61,10 +59,9 @@ class TelegramClientManager:
             offset_id = 0
             offset_topic = 0
             
-            self.logger.info("Searching for 10 latest UA/UB topics...")
+            self.logger.info("Searching for 1 latest UA/UB topics...")
             
-            while len(collected_topics) < 7:
-                from telethon.tl.functions.messages import GetForumTopicsRequest
+            while len(collected_topics) < 1:
                 result = await self.client(GetForumTopicsRequest(
                     peer=chat,
                     q='',
@@ -92,10 +89,10 @@ class TelegramClientManager:
                         # Пишем в лог, что мы нашли подходящий топик!
                         self.logger.info(f"✅ Найден топик: {topic.title} (ID: {topic.id})")
                         
-                        if len(collected_topics) == 7:
+                        if len(collected_topics) == 1:
                             break
                             
-                if len(collected_topics) == 7:
+                if len(collected_topics) == 1:
                     break
                 
                 if getattr(result, 'messages', []):
@@ -114,27 +111,55 @@ class TelegramClientManager:
             self.logger.error(f"Failed to get topics: {e}")
             return []
     
-    async def get_topic_messages(self, topic_id: int, days_back: int = None) -> List[Dict[str, Any]]:
-        """Get messages from a specific topic within the specified time range."""
-        if days_back is None:
-            days_back = int(os.getenv('DAYS_TO_PROCESS', '7'))
+    def _create_topic_folder(self, topic_id: int) -> str:
+        """Create folder for topic downloads."""
+        download_dir = os.path.join(os.getenv('DOWNLOADS_DIR', 'downloads'), f"topic_{topic_id}")
+        os.makedirs(download_dir, exist_ok=True)
+        self.logger.info(f"Создана папка для топика: {download_dir}")
+        return download_dir
+    
+    def _save_message_to_log(self, topic_dir: str, message_data: Dict[str, Any]) -> None:
+        """Save message text to log file with proper formatting."""
+        if not message_data.get('text'):
+            return
+            
+        log_file = os.path.join(topic_dir, 'messages_log.txt')
+        timestamp = message_data['date'].strftime('%Y-%m-%d %H:%M:%S')
+        log_entry = f"[{timestamp}] | [{message_data['id']}] | {message_data['text']}\n{'='*50}\n"
         
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(log_entry)
+        
+        self.logger.info(f"Найдено сообщение с текстом (ID: {message_data['id']}), сохранено.")
+    
+    async def download_topic_content(self, topic_id: int, message_limit: int = 100) -> Dict[str, int]:
+        """
+        Download all text messages and photos from a specific Telegram topic.
+        
+        Args:
+            topic_id: ID of the topic to download from
+            message_limit: Maximum number of messages to process (default: 100)
+            
+        Returns:
+            Dict with counts: {'text_messages': X, 'photos': Y}
+        """
         try:
-            chat = await self.client.get_entity(os.getenv('TARGET_CHAT_ID'))
-            topic_entity = await self.client.get_entity(os.getenv('TARGET_CHAT_ID'))
+            # Step 1: Create topic folder
+            topic_dir = self._create_topic_folder(topic_id)
             
-            # Get messages from the topic
-            messages = []
-            cutoff_date = datetime.now() - timedelta(days=days_back)
+            # Step 2: Get messages from topic
+            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            photos_count = 0
+            text_count = 0
             
+            self.logger.info(f"Начинаю выгрузку топика {topic_id}...")
+            
+            # Step 3: Process messages
             async for message in self.client.iter_messages(
                 chat,
                 reply_to=topic_id,
-                offset_date=cutoff_date
+                limit=message_limit
             ):
-                if message.date < cutoff_date:
-                    break
-                
                 message_data = {
                     'id': message.id,
                     'date': message.date,
@@ -144,91 +169,55 @@ class TelegramClientManager:
                     'media_type': None
                 }
                 
-                # Determine media type
-                if message.media:
-                    if isinstance(message.media, MessageMediaPhoto):
-                        message_data['media_type'] = 'photo'
-                    elif isinstance(message.media, MessageMediaDocument):
-                        message_data['media_type'] = 'document'
+                # Step 4: Handle text content
+                if message.text:
+                    self._save_message_to_log(topic_dir, message_data)
+                    text_count += 1
                 
-                messages.append(message_data)
+                # Step 5: Handle media content
+                if message.media and isinstance(message.media, MessageMediaPhoto):
+                    self.logger.info(f"Скачивается фотография (ID: {message.id})...")
+                    
+                    # Download photo with proper naming
+                    file_name = f"photo_{message.id}.jpg"
+                    file_path = os.path.join(topic_dir, file_name)
+                    
+                    try:
+                        downloaded_path = await self.client.download_media(
+                            message,
+                            file=file_path
+                        )
+                        
+                        if downloaded_path:
+                            photos_count += 1
+                            self.logger.info(f"Фотография успешно скачана: {downloaded_path}")
+                        
+                        # Rate limiting between downloads
+                        await asyncio.sleep(0.5)
+                        
+                    except FloodWaitError as e:
+                        self.logger.warning(f"Flood wait: {e.seconds} секунд")
+                        await asyncio.sleep(e.seconds)
+                        # Retry download after wait
+                        downloaded_path = await self.client.download_media(
+                            message,
+                            file=file_path
+                        )
+                        if downloaded_path:
+                            photos_count += 1
                 
-                # Rate limiting
-                await asyncio.sleep(float(os.getenv('RATE_LIMIT_DELAY', '1.0')))
+                # Small delay between processing messages
+                await asyncio.sleep(0.2)
             
-            self.logger.info(f"Retrieved {len(messages)} messages from topic {topic_id}")
-            return messages
+            # Step 6: Final summary
+            summary = f"Загрузка топика завершена. Всего скачано {photos_count} фото и {text_count} текстовых сообщений."
+            self.logger.info(summary)
             
-        except FloodWaitError as e:
-            self.logger.warning(f"Flood wait: {e.seconds} seconds")
-            await asyncio.sleep(e.seconds)
-            return await self.get_topic_messages(topic_id, days_back)
-        except Exception as e:
-            self.logger.error(f"Failed to get messages from topic {topic_id}: {e}")
-            return []
-    
-    async def download_media(self, message_id: int, topic_id: int) -> List[str]:
-        """Download media files from a message."""
-        try:
-            chat = await self.client.get_entity(os.getenv('TARGET_CHAT_ID'))
-            message = await self.client.get_messages(chat, ids=message_id)
-            
-            if not message.media:
-                return []
-            
-            # Create download directory for this topic
-            download_dir = os.path.join(os.getenv('DOWNLOADS_DIR', 'downloads'), f"topic_{topic_id}")
-            os.makedirs(download_dir, exist_ok=True)
-            
-            downloaded_files = []
-            
-            if message.media:
-                file_name = f"msg_{message_id}_{int(time.time())}"
-                file_path = await self.client.download_media(
-                    message,
-                    file=os.path.join(download_dir, file_name)
-                )
-                
-                if file_path:
-                    downloaded_files.append(file_path)
-                    self.logger.info(f"Downloaded: {file_path}")
-            
-            await asyncio.sleep(float(os.getenv('RATE_LIMIT_DELAY', '1.0')))
-            return downloaded_files
+            return {
+                'text_messages': text_count,
+                'photos': photos_count
+            }
             
         except Exception as e:
-            self.logger.error(f"Failed to download media from message {message_id}: {e}")
-            return []
-    
-    async def get_topic_by_site_id(self, site_id: str) -> Optional[int]:
-        """Find topic ID by site ID in topic title."""
-        try:
-            topics = await self.get_chat_topics()
-            
-            for topic in topics:
-                if site_id.lower() in topic['title'].lower():
-                    return topic['topic_id']
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Failed to find topic for site ID {site_id}: {e}")
-            return None
-    
-    def extract_site_id_from_topic(self, topic_title: str) -> Optional[str]:
-        """Extract site ID from topic title."""
-        # Simple extraction - look for patterns like "SITE123", "BS-456", etc.
-        import re
-        
-        patterns = [
-            r'(?:SITE|BS|BASE|STATION)[\s-]*([A-Z0-9]{3,})',
-            r'([A-Z]{2,4}\d{3,})',
-            r'(\d{4,})'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, topic_title, re.IGNORECASE)
-            if match:
-                return match.group(1).upper()
-        
-        return None
+            self.logger.error(f"Ошибка при выгрузке топика {topic_id}: {e}")
+            return {'text_messages': 0, 'photos': 0}
