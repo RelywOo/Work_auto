@@ -17,7 +17,7 @@ downloads/
 output/
 *.db
 fix.txt
-session_name.session-journal
+feat.txt
 
 # Виртуальное окружение (если появится в будущем)
 venv/
