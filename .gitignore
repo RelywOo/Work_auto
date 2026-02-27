@@ -17,7 +17,6 @@ downloads/
 output/
 *.db
 fix.txt
-feat.txt
 
 # Виртуальное окружение (если появится в будущем)
 venv/

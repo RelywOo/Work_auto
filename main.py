@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import re
+import shutil
 from dotenv import load_dotenv
 
 from modules.telegram_client import TelegramClientManager
@@ -16,6 +18,80 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+def extract_site_id(topic_title):
+    """Извлекает чистый ID сайта из названия топика с помощью regex."""
+    match = re.search(r'(UA|UB)\d+', topic_title)
+    if match:
+        return match.group(0)
+    return None
+
+def create_readme_file(topic_dir, equipment_lists, text_messages):
+    """Создает файл README.txt с отчетом о демонтаже/монтаже."""
+    readme_path = os.path.join(topic_dir, 'README.txt')
+    
+    with open(readme_path, 'w', encoding='utf-8') as f:
+        f.write("ОТЧЕТ О РАБОТАХ ПО САЙТУ\n")
+        f.write("=" * 40 + "\n\n")
+        
+        if equipment_lists['demontaj']:
+            f.write("ОБОРУДОВАНИЕ НА ДЕМОНТАЖ:\n")
+            for item in equipment_lists['demontaj']:
+                f.write(f"- {item}\n")
+            f.write("\n")
+        
+        if equipment_lists['montaj']:
+            f.write("ОБОРУДОВАНИЕ НА МОНТАЖ:\n")
+            for item in equipment_lists['montaj']:
+                f.write(f"- {item}\n")
+            f.write("\n")
+        
+        if text_messages:
+            f.write("ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ:\n")
+            f.write("-" * 30 + "\n")
+            for msg in text_messages:
+                f.write(f"{msg}\n")
+    
+    return readme_path
+
+def create_zip_report(site_id, source_folder, output_folder):
+    """Создает ZIP-архив с фото из папки Demontaj и README.txt."""
+    # Создаем выходную папку если ее нет
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Путь к архиву
+    zip_path = os.path.join(output_folder, f"{site_id}")
+    
+    # Временная папка для содержимого архива
+    temp_folder = os.path.join(source_folder, "temp_zip_content")
+    os.makedirs(temp_folder, exist_ok=True)
+    
+    try:
+        # Копируем папку Demontaj если она существует
+        demontaj_folder = os.path.join(source_folder, "Demontaj")
+        if os.path.exists(demontaj_folder):
+            shutil.copytree(demontaj_folder, os.path.join(temp_folder, "Demontaj"))
+        
+        # Копируем README.txt если он существует
+        readme_path = os.path.join(source_folder, "README.txt")
+        if os.path.exists(readme_path):
+            shutil.copy2(readme_path, temp_folder)
+        
+        # Создаем ZIP-архив
+        shutil.make_archive(zip_path, 'zip', temp_folder)
+        
+        # Удаляем временную папку
+        shutil.rmtree(temp_folder)
+        
+        logger.info(f"ZIP-архив создан: {zip_path}.zip")
+        return f"{zip_path}.zip"
+        
+    except Exception as e:
+        # Удаляем временную папку в случае ошибки
+        if os.path.exists(temp_folder):
+            shutil.rmtree(temp_folder)
+        logger.error(f"Ошибка при создании ZIP-архива: {e}")
+        raise
 
 async def main():
     """Main entry point for Telegram authentication and topic listing."""
@@ -71,8 +147,15 @@ async def main():
             topic_id = latest_topic['topic_id']
             topic_title = latest_topic['title']
             
+            # Извлекаем чистый ID сайта из названия топика
+            site_id = extract_site_id(topic_title)
+            if not site_id:
+                logger.error(f"Не удалось извлечь ID сайта из названия: {topic_title}")
+                return
+            
             print("\n🚀 НАЧИНАЮ ВЫГРУЗКУ КОНТЕНТА ИЗ ТОПИКА:")
             print(f"📌 Топик: {topic_title} (ID: {topic_id})")
+            print(f"🏷️ ID сайта: {site_id}")
             print('='*60)
             
             # Download content from the topic
@@ -113,6 +196,20 @@ async def main():
                     if equipment_lists['demontaj']:
                         print(f"   Список демонтажа: {', '.join(equipment_lists['demontaj'])}")
                     
+                    # Создаем README.txt файл с отчетом
+                    print("\n📝 Создаю README.txt с отчетом...")
+                    
+                    # Читаем реальные текстовые сообщения из лога
+                    text_messages = []
+                    try:
+                        with open(log_file_path, 'r', encoding='utf-8') as f:
+                            text_messages = f.readlines()
+                    except Exception as e:
+                        logger.warning(f"Не удалось прочитать текстовые сообщения: {e}")
+                    
+                    readme_path = create_readme_file(topic_dir, equipment_lists, text_messages)
+                    print(f"✅ README.txt создан: {readme_path}")
+                    
                     # Шаг 2: Анализируем фотографии
                     if equipment_lists['demontaj']:
                         print("\n📸 Анализирую фотографии...")
@@ -131,6 +228,12 @@ async def main():
                         print(f"   Демонтаж: {stats['demontaj']} фото")
                         print(f"   Монтаж: {stats['montaj']} фото")
                         print(f"   Другое: {stats['other']} фото")
+                        
+                        # Создаем ZIP-архив с результатами
+                        print("\n📦 Создаю ZIP-архив с отчетом...")
+                        output_folder = "output"
+                        zip_path = create_zip_report(site_id, topic_dir, output_folder)
+                        print(f"✅ ZIP-архив создан: {zip_path}")
                         print('='*60)
                     else:
                         print("⚠️ Список демонтажа пуст, анализ фотографий не требуется")
