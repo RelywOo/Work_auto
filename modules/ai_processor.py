@@ -80,13 +80,14 @@ class AIProcessor:
             self.logger.error(f"Ошибка при извлечении списков оборудования: {e}")
             return {"demontaj": [], "montaj": []}
     
-    def analyze_photo(self, photo_path: str, demontaj_list: List[str]) -> Dict[str, Any]:
+    def analyze_photo(self, photo_path: str, demontaj_list: List[str], montaj_list: List[str]) -> Dict[str, Any]:
         """
         Анализирует фотографию для определения демонтированного оборудования.
         
         Args:
             photo_path: Путь к файлу фотографии
             demontaj_list: Список оборудования для демонтажа
+            montaj_list: Список оборудования для монтажа
             
         Returns:
             Dict с результатами анализа: is_demontaj, equipment_found, reason
@@ -96,17 +97,23 @@ class AIProcessor:
             if not os.path.exists(photo_path):
                 raise FileNotFoundError(f"Фото файл не найден: {photo_path}")
             
-            # Формируем промпт со списком демонтажа
-            equipment_list_str = ", ".join(demontaj_list) if demontaj_list else "Нет списка оборудования"
+            demontaj_str = ", ".join(demontaj_list) if demontaj_list else "Нет списка"
+            montaj_str = ", ".join(montaj_list) if montaj_list else "Нет списка"
             
-            prompt = f"""Ты — эксперт по телекоммуникационному оборудованию. 
-            Вот список оборудования, которое было ДЕМОНТИРОВАНО (снято с вышки): [{equipment_list_str}].
+            prompt = f"""Ты — строгий технический аудитор телеком-оборудования. 
+            Твоя задача — определить, относится ли это фото к ДЕМОНТАЖУ (снятое старое оборудование) или к МОНТАЖУ/ДРУГОМУ.
             
-            Внимательно изучи эту фотографию.
-            1. Поищи маркировки, шильдики, названия моделей.
-            2. Оцени контекст: демонтированное оборудование часто грязное, лежит на земле, в кузове машины или имеет обрезанные кабели.
+            Список ДЕМОНТАЖА (ищем это): [{demontaj_str}]
+            Список МОНТАЖА (это новое оборудование, игнорируй его): [{montaj_str}]
             
-            Ответь в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Название из списка или null", "reason": "Краткое объяснение, почему ты так решил"}}."""
+            ПРАВИЛА ИСКЛЮЧЕНИЯ (КРИТИЧНО ВАЖНО):
+            1. Внимательно читай номера моделей на шильдиках (например, RRU 3971 vs RRU 5527). Не перепутай старую модель с новой.
+            2. Пересечения: Если тип оборудования (например, DCDU или Кабель) есть В ОБОИХ списках, смотри на ВНЕШНИЙ ВИД:
+               - НОВОЕ: В картонной коробке, в заводской пленке, пенопласте, с чистыми разъемами/заглушками -> ЭТО МОНТАЖ (is_demontaj: false).
+               - СТАРОЕ: Грязное, ржавое, в пыли, валяется на земле, обрезаны провода/коннекторы -> ЭТО ДЕМОНТАЖ (is_demontaj: true).
+            3. Если ты не уверен на 100% или это просто панорама вышки — отвечай is_demontaj: false.
+            
+            Ответь строго в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Название из списка демонтажа или null", "reason": "Детально объясни по визуальным признакам, почему это старое/новое"}}."""
             
             # Загружаем изображение
             image = Image.open(photo_path)
@@ -114,10 +121,10 @@ class AIProcessor:
             try:
                 # Отправляем запрос к Gemini Vision API
                 response = self.vision_model.generate_content(
-                    [prompt, image],
+                    [prompt, image],    
                     generation_config=genai.types.GenerationConfig(
                         response_mime_type="application/json",
-                        temperature=0.2,
+                        temperature=0.1, # Понизили температуру для большей строгости
                     )
                 )
                 
@@ -135,7 +142,7 @@ class AIProcessor:
                 
                 # Логируем результат
                 equipment_name = result['equipment_found'] or 'не определено'
-                self.logger.info(f"Анализ фото {os.path.basename(photo_path)}: демонтаж={result['is_demontaj']}, оборудование={equipment_name}")
+                self.logger.info(f"Анализ фото {os.path.basename(photo_path)}: демонтаж={result['is_demontaj']}, оборудование={equipment_name}. Причина: {result.get('reason')}")
                 
                 return result
                 
@@ -153,13 +160,14 @@ class AIProcessor:
             self.logger.error(f"Ошибка при анализе фотографии {photo_path}: {e}")
             return {"is_demontaj": False, "equipment_found": None, "reason": "Техническая ошибка"}
     
-    def process_photos_batch(self, photo_dir: str, demontaj_list: List[str], delay_seconds: int = 2) -> List[Dict[str, Any]]:
+    def process_photos_batch(self, photo_dir: str, demontaj_list: List[str], montaj_list: List[str], delay_seconds: int = 2) -> List[Dict[str, Any]]:
         """
         Обрабатывает все фотографии в директории с задержкой между запросами.
         
         Args:
             photo_dir: Директория с фотографиями
             demontaj_list: Список оборудования для демонтажа
+            montaj_list: Список оборудования для монтажа
             delay_seconds: Задержка между запросами в секундах
             
         Returns:
@@ -180,7 +188,7 @@ class AIProcessor:
         for i, photo_path in enumerate(photo_files, 1):
             self.logger.info(f"Анализирую фото {i}/{len(photo_files)}: {os.path.basename(photo_path)}")
             
-            result = self.analyze_photo(photo_path, demontaj_list)
+            result = self.analyze_photo(photo_path, demontaj_list, montaj_list) # добавили аргумент
             result['photo_path'] = photo_path
             result['filename'] = os.path.basename(photo_path)
             results.append(result)

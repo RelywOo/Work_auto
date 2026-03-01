@@ -1,6 +1,7 @@
 # Секреты и конфиги (ВАЖНО)
 .env
 *.session
+*.session-journal
 
 # Python кэш
 __pycache__/
@@ -16,7 +17,7 @@ swap_automator.log
 downloads/
 output/
 *.db
-fix.txt
+*.txt
 
 # Виртуальное окружение (если появится в будущем)
 venv/
