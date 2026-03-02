@@ -2,6 +2,7 @@ import os
 import json
 import time
 import logging
+import shutil
 from typing import Dict, List, Any
 import google.generativeai as genai
 from PIL import Image
@@ -199,60 +200,3 @@ class AIProcessor:
         
         return results
 
-def organize_files_by_analysis(photo_dir: str, analysis_results: List[Dict[str, Any]]) -> Dict[str, int]:
-    """
-    Организует файлы в папки на основе результатов анализа.
-    
-    Args:
-        photo_dir: Директория с фотографиями
-        analysis_results: Результаты анализа фотографий
-        
-    Returns:
-        Статистика перемещенных файлов
-    """
-    stats = {'demontaj': 0, 'montaj': 0, 'other': 0}
-    
-    # Создаем подпапки если их нет
-    demontaj_dir = os.path.join(photo_dir, 'Demontaj')
-    montaj_dir = os.path.join(photo_dir, 'Montaj')
-    other_dir = os.path.join(photo_dir, 'Other')
-    
-    os.makedirs(demontaj_dir, exist_ok=True)
-    os.makedirs(montaj_dir, exist_ok=True)
-    os.makedirs(other_dir, exist_ok=True)
-    
-    logger = logging.getLogger(__name__)
-    
-    for result in analysis_results:
-        photo_path = result['photo_path']
-        filename = result['filename']
-        
-        # Определяем целевую папку
-        if result['is_demontaj']:
-            target_dir = demontaj_dir
-            stats['demontaj'] += 1
-        else:
-            # Если это не демонтаж, считаем это монтажом или другим
-            target_dir = montaj_dir
-            stats['montaj'] += 1
-        
-        # Переименовываем файл если найдено оборудование
-        if result['equipment_found']:
-            equipment_name = result['equipment_found'].replace(' ', '_').replace('/', '_')
-            new_filename = f"{equipment_name}_{filename}"
-        else:
-            new_filename = filename
-        
-        target_path = os.path.join(target_dir, new_filename)
-        
-        # Перемещаем файл
-        try:
-            import shutil
-            shutil.move(photo_path, target_path)
-            logger.info(f"Файл {filename} перемещен в {os.path.basename(target_dir)} как {new_filename}")
-        except Exception as e:
-            logger.error(f"Ошибка при перемещении файла {filename}: {e}")
-            stats['other'] += 1
-    
-    logger.info(f"Организация файлов завершена: Демонтаж={stats['demontaj']}, Монтаж={stats['montaj']}, Другое={stats['other']}")
-    return stats

@@ -8,6 +8,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 import logging
 from telethon.tl.functions.messages import GetForumTopicsRequest
 from modules.task_queue import TaskQueue
+from modules.database import DatabaseManager
 
 class TelegramClientManager:
     def __init__(self):
@@ -20,6 +21,7 @@ class TelegramClientManager:
         self.active_topics = {}  # Для отслеживания активных топиков и таймеров
         self.wait_time = int(os.getenv('WAIT_TIME', '300'))  # 5 минут по умолчанию
         self.task_queue = TaskQueue(max_workers=2, telegram_client=self)  # Передаем себя в очередь
+        self.db = DatabaseManager()  # Инициализация базы данных
     
     async def connect(self):
         """Connect to Telegram and authenticate if needed."""
@@ -152,19 +154,30 @@ class TelegramClientManager:
             # Step 1: Create topic folder
             topic_dir = self._create_topic_folder(topic_id)
             
-            # Step 2: Get messages from topic
+            # Step 2: Get last processed message ID from database
+            last_msg_id = self.db.get_last_msg_id(topic_id)
+            
+            # Step 3: Get messages from topic
             chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
             photos_count = 0
             text_count = 0
+            max_message_id = 0
             
-            self.logger.info(f"Начинаю выгрузку топика {topic_id}...")
+            self.logger.info(f"Начинаю выгрузку топика {topic_id}... (last_msg_id: {last_msg_id})")
             
-            # Step 3: Process messages
-            async for message in self.client.iter_messages(
-                chat,
-                reply_to=topic_id,
-                limit=message_limit
-            ):
+            # Step 4: Process messages with min_id filter
+            iter_params = {
+                'entity': chat,
+                'reply_to': topic_id,
+                'limit': message_limit
+            }
+            
+            # Add min_id if we have processed messages before
+            if last_msg_id is not None:
+                iter_params['min_id'] = last_msg_id
+                self.logger.info(f"Использую min_id={last_msg_id} для скачивания только новых сообщений")
+            
+            async for message in self.client.iter_messages(**iter_params):
                 message_data = {
                     'id': message.id,
                     'date': message.date,
@@ -174,13 +187,29 @@ class TelegramClientManager:
                     'media_type': None
                 }
                 
-                # Step 4: Handle text content
+                # Track the maximum message ID
+                if message.id > max_message_id:
+                    max_message_id = message.id
+                
+                # Step 5: Handle text content
                 if message.text:
+                    # Проверяем, не было ли это текстовое сообщение уже обработано
+                    if self.db.is_message_processed(message.id):
+                        self.logger.info(f"Текстовое сообщение {message.id} уже обработано, пропускаю")
+                        continue
+                    
                     self._save_message_to_log(topic_dir, message_data)
                     text_count += 1
+                    # Сохраняем информацию о текстовом сообщении в базу данных
+                    self.db.save_message(message.id, topic_id, 'text')
                 
-                # Step 5: Handle media content
+                # Step 6: Handle media content
                 if message.media and isinstance(message.media, MessageMediaPhoto):
+                    # Проверяем, не было ли это сообщение уже обработано
+                    if self.db.is_message_processed(message.id):
+                        self.logger.info(f"Сообщение {message.id} уже обработано, пропускаю")
+                        continue
+                    
                     self.logger.info(f"Скачивается фотография (ID: {message.id})...")
                     
                     # Download photo with proper naming
@@ -196,6 +225,8 @@ class TelegramClientManager:
                         if downloaded_path:
                             photos_count += 1
                             self.logger.info(f"Фотография успешно скачана: {downloaded_path}")
+                            # Сохраняем информацию о скачанном файле в базу данных
+                            self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
                         
                         # Rate limiting between downloads
                         await asyncio.sleep(0.5)
@@ -210,11 +241,20 @@ class TelegramClientManager:
                         )
                         if downloaded_path:
                             photos_count += 1
+                            # Сохраняем информацию о скачанном файле в базу данных
+                            self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
                 
                 # Small delay between processing messages
                 await asyncio.sleep(0.2)
             
-            # Step 6: Final summary
+            # Step 7: Update database with the latest message ID
+            if max_message_id > 0:
+                topic_title = await self.get_topic_title_by_id(topic_id)
+                title = topic_title or f"Topic {topic_id}"
+                self.db.update_topic(topic_id, title, max_message_id)
+                self.logger.info(f"Обновил БД: topic_id={topic_id}, last_msg_id={max_message_id}")
+            
+            # Step 8: Final summary
             summary = f"Загрузка топика завершена. Всего скачано {photos_count} фото и {text_count} текстовых сообщений."
             self.logger.info(summary)
             

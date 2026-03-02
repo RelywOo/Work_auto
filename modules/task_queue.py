@@ -4,6 +4,7 @@ from typing import Dict, Any
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import os
+import shutil
 from modules.utils import extract_site_id, create_readme_file, create_zip_report
 
 class TaskQueue:
@@ -15,7 +16,6 @@ class TaskQueue:
         self.max_workers = max_workers
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.active_tasks = set()
-        self.processed_topics = set()
         self.telegram_client = telegram_client  # ← Сохраняем активный клиент
         self.main_loop = main_loop  # ← Сохраняем основной event loop
         
@@ -54,10 +54,27 @@ class TaskQueue:
                 # Получаем задачу из очереди (блокирующая операция)
                 task_data = await self.queue.get()
                 
-                # Проверяем, не обрабатывали ли уже этот топик
+                # Проверяем, есть ли новые сообщения для этого топика
                 topic_id = task_data['topic_id']
-                if topic_id in self.processed_topics:
-                    self.logger.warning(f"⚠️ Топик {topic_id} уже был обработан, пропускаем")
+                last_msg_id = self.telegram_client.db.get_last_msg_id(topic_id)
+                
+                # Проверяем, есть ли файлы для ИИ-обработки
+                unprocessed_files = self.telegram_client.db.get_unprocessed_files(topic_id)
+                has_ai_files = len(unprocessed_files) > 0
+                
+                # Определяем, нужно ли обрабатывать топик
+                should_process = False
+                if last_msg_id is None:
+                    self.logger.info(f"🆕 Новый топик {topic_id}, начинаем обработку")
+                    should_process = True
+                elif has_ai_files:
+                    self.logger.info(f"🤖 Топик {topic_id} имеет {len(unprocessed_files)} необработанных ИИ файлов")
+                    should_process = True
+                else:
+                    self.logger.info(f"ℹ️ Топик {topic_id} уже обработан, пропускаем")
+                
+                # Если не нужно обрабатывать, помечаем задачу как завершенную и продолжаем
+                if not should_process:
                     self.queue.task_done()
                     continue
                 
@@ -83,10 +100,9 @@ class TaskQueue:
                     task_data['end_time'] = datetime.now()
                     self.logger.error(f"❌ {worker_name} не смог обработать топик {topic_id}: {e}")
                 
-                finally:
-                    # Помечаем как обработанный
-                    self.processed_topics.add(topic_id)
-                    self.queue.task_done()
+                # База данных теперь отслеживает обработанные топики через last_msg_id
+                # Дополнительное помечение не требуется
+                self.queue.task_done()
                     
             except asyncio.CancelledError:
                 self.logger.info(f"⏹️ {worker_name} останавливается")
@@ -116,18 +132,87 @@ class TaskQueue:
             )
             download_result = future.result(timeout=300)  # 5 минут таймаут
             
-            if download_result['photos'] > 0 or download_result['text_messages'] > 0:
+            # Проверяем, есть ли файлы для ИИ-обработки (независимо от новых скачиваний)
+            unprocessed_files = telegram_client.db.get_unprocessed_files(topic_id)
+            
+            if download_result['photos'] > 0 or download_result['text_messages'] > 0 or unprocessed_files:
                 # Извлекаем ID сайта
                 site_id = extract_site_id(topic_title)
                 
-                # Запускаем ИИ-обработку
-                ai_processor = AIProcessor()
-                topic_dir = os.path.join('downloads', f'topic_{topic_id}')
-                log_file_path = os.path.join(topic_dir, 'messages_log.txt')
+                # === ИНТЕГРАЦИЯ ИИ-ОБРАБОТКИ И СОРТИРОВКИ ===
+                try:
+                    # Инициализируем ИИ-процессор
+                    from modules.ai_processor import AIProcessor
+                    ai_processor = AIProcessor()
+                    
+                    if unprocessed_files:
+                        self.logger.info(f"🤖 Найдено {len(unprocessed_files)} файлов для ИИ-обработки")
+                        
+                        # Извлекаем списки оборудования из лога
+                        topic_dir = os.path.join('downloads', f'topic_{topic_id}')
+                        log_file_path = os.path.join(topic_dir, 'messages_log.txt')
+                        equipment_lists = ai_processor.extract_equipment_lists(log_file_path)
+                        
+                        # Создаем папки для сортировки
+                        montaj_dir = os.path.join(topic_dir, 'Montaj')
+                        demontaj_dir = os.path.join(topic_dir, 'Demontaj')
+                        unknown_dir = os.path.join(topic_dir, 'Unknown')
+                        
+                        os.makedirs(montaj_dir, exist_ok=True)
+                        os.makedirs(demontaj_dir, exist_ok=True)
+                        os.makedirs(unknown_dir, exist_ok=True)
+                        
+                        # Обрабатываем каждый файл
+                        for message_id, file_path in unprocessed_files:
+                            try:
+                                # Анализируем фото через ИИ
+                                analysis_result = ai_processor.analyze_photo(
+                                    file_path, 
+                                    equipment_lists['demontaj'], 
+                                    equipment_lists['montaj']
+                                )
+                                
+                                # Определяем результат
+                                if analysis_result['is_demontaj']:
+                                    ai_result = 'demontaj'
+                                    target_dir = demontaj_dir
+                                elif analysis_result['equipment_found']:
+                                    ai_result = 'montaj'
+                                    target_dir = montaj_dir
+                                else:
+                                    ai_result = 'unknown'
+                                    target_dir = unknown_dir
+                                
+                                # СНАЧАЛА физически перемещаем файл
+                                filename = os.path.basename(file_path)
+                                target_path = os.path.join(target_dir, filename)
+                                
+                                try:
+                                    shutil.move(file_path, target_path)
+                                    self.logger.info(f"📁 Файл {filename} перемещен в {os.path.basename(target_dir)}")
+                                    
+                                    # ПОТОМ обновляем результат в БД (только если перемещение успешно)
+                                    telegram_client.db.update_ai_result(message_id, ai_result)
+                                    self.logger.info(f"🤖 Файл {filename} классифицирован как '{ai_result}' и записан в БД")
+                                    
+                                except Exception as move_error:
+                                    self.logger.error(f"❌ Ошибка перемещения файла {filename}: {move_error}")
+                                    # Не обновляем БД, оставляем файл для повторной обработки
+                                    raise
+                                
+                            except Exception as e:
+                                self.logger.error(f"❌ Ошибка при обработке файла {file_path}: {e}")
+                                # Не обновляем ai_result, оставляем 0 для повторной обработки
+                        
+                        self.logger.info(f"✅ ИИ-обработка топика {topic_id} завершена")
+                    else:
+                        self.logger.info(f"ℹ️ Нет файлов для ИИ-обработки в топике {topic_id}")
+                        
+                except Exception as e:
+                    self.logger.error(f"🚨 Критическая ошибка ИИ-обработки топика {topic_id}: {e}")
+                    # Продолжаем выполнение, но логируем ошибку
                 
-                # Извлекаем списки оборудования
-                equipment_lists = ai_processor.extract_equipment_lists(log_file_path)
-                
+                # === СУЩЕСТВУЮЩАЯ ЛОГИКА ===
                 # Создаем README
                 text_messages = []
                 try:
@@ -140,22 +225,10 @@ class TaskQueue:
                 readme_path = create_readme_file(topic_dir, equipment_lists, text_messages)
                 self.logger.info(f"📝 README.txt создан: {readme_path}")
                 
-                # Анализируем фотографии
-                if equipment_lists['demontaj']:
-                    analysis_results = ai_processor.process_photos_batch(
-                        topic_dir, 
-                        equipment_lists['demontaj'],
-                        equipment_lists['montaj'],
-                        delay_seconds=2
-                    )
-                    
-                    # Организуем файлы
-                    organize_files_by_analysis(topic_dir, analysis_results)
-                    
-                    # Создаем ZIP-архив
-                    output_folder = "output"
-                    zip_path = create_zip_report(site_id, topic_dir, output_folder)
-                    self.logger.info(f"📦 ZIP-архив создан: {zip_path}")
+                # Создаем ZIP-архив
+                output_folder = "output"
+                zip_path = create_zip_report(site_id, topic_dir, output_folder)
+                self.logger.info(f"📦 ZIP-архив создан: {zip_path}")
                 
             else:
                 self.logger.warning(f"Топик {topic_id} пуст, нечего обрабатывать")
@@ -168,7 +241,7 @@ class TaskQueue:
         return {
             'queue_size': self.queue.qsize(),
             'active_tasks': len(self.active_tasks),
-            'processed_topics': len(self.processed_topics),
+            # 'processed_topics': len(self.processed_topics),  # Убрали, теперь используем БД
             'max_workers': self.max_workers
         }
     
