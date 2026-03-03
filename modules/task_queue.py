@@ -118,7 +118,7 @@ class TaskQueue:
         
         try:
             # Импортируем здесь для избежания circular imports
-            from modules.ai_processor import AIProcessor, organize_files_by_analysis
+            from modules.ai_processor import AIProcessor 
             
             # Используем существующий активный клиент
             telegram_client = self.telegram_client

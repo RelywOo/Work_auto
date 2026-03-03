@@ -56,8 +56,8 @@ class TelegramClientManager:
         """Disconnect from Telegram."""
         await self.client.disconnect()
     
-    async def get_chat_topics(self) -> List[Dict[str, Any]]:
-        """Get 10 latest topics containing UA or UB from the target chat."""
+    async def get_chat_topics(self, limit: int = 1) -> List[Dict[str, Any]]:
+        """Get latest topics containing UA or UB from the target chat."""
         try:
             chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
             collected_topics = []
@@ -66,9 +66,9 @@ class TelegramClientManager:
             offset_id = 0
             offset_topic = 0
             
-            self.logger.info("Searching for 1 latest UA/UB topics...")
+            self.logger.info(f"Searching for {limit} latest UA/UB topics...")
             
-            while len(collected_topics) < 1:
+            while len(collected_topics) < limit:
                 result = await self.client(GetForumTopicsRequest(
                     peer=chat,
                     q='',
@@ -96,10 +96,10 @@ class TelegramClientManager:
                         # Пишем в лог, что мы нашли подходящий топик!
                         self.logger.info(f"✅ Найден топик: {topic.title} (ID: {topic.id})")
                         
-                        if len(collected_topics) == 1:
+                        if len(collected_topics) == limit:
                             break
                             
-                if len(collected_topics) == 1:
+                if len(collected_topics) == limit:
                     break
                 
                 if getattr(result, 'messages', []):
@@ -367,6 +367,44 @@ class TelegramClientManager:
         except Exception as e:
             self.logger.error(f"Ошибка при добавлении топика {topic_id} в очередь: {e}")
     
+    async def run_startup_recovery(self):
+        """Выполняет восстановление незавершенных задач при запуске бота."""
+        try:
+            self.logger.info("🔄 Начинаю процедуру восстановления после сбоев...")
+            
+            # Инициализируем пустое множество для уникальных топиков
+            recovery_topics = set()
+            
+            # Восстановление ИИ: ищем топики с необработанными файлами
+            unprocessed_topics = self.db.get_topics_with_unprocessed_files()
+            if unprocessed_topics:
+                recovery_topics.update(unprocessed_topics)
+                self.logger.info(f"🔍 Найдено {len(unprocessed_topics)} топиков с необработанными файлами ИИ: {unprocessed_topics}")
+            else:
+                self.logger.info("✅ Топиков с необработанными файлами ИИ не найдено")
+            
+            # Восстановление скачиваний: проверяем последние активные топики
+            recent_topics = await self.get_chat_topics(limit=1)
+            if recent_topics:
+                recent_topic_ids = [topic['topic_id'] for topic in recent_topics]
+                recovery_topics.update(recent_topic_ids)
+                self.logger.info(f"🔍 Проверка {len(recent_topics)} последнего активного топика на наличие пропущенных сообщений: {recent_topic_ids}")
+            else:
+                self.logger.info("✅ Недавние активные топики не найдены")
+            
+            # Добавляем все найденные топики в очередь обработки
+            if recovery_topics:
+                self.logger.info(f"📋 Добавляю {len(recovery_topics)} топиков в очередь восстановления: {list(recovery_topics)}")
+                for topic_id in recovery_topics:
+                    await self.add_topic_to_queue(topic_id)
+            else:
+                self.logger.info("✅ Топики для восстановления не найдены")
+            
+            self.logger.info("🎉 Процедура восстановления завершена")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка в процедуре восстановления: {e}")
+    
     def setup_event_handler(self, process_callback=None):
         """Настроить обработчик событий для новых сообщений."""
         
@@ -415,6 +453,10 @@ class TelegramClientManager:
         asyncio.create_task(self.task_queue.start_consumer())
         
         try:
+            # Выполняем восстановление перед запуском основного режима
+            await self.run_startup_recovery()
+            self.logger.info("🔄 Процедура восстановления завершена, перехожу в режим ожидания новых сообщений...")
+            
             self.logger.info("👂 Начинаю слушать сообщения 24/7...")
             self.logger.info(f"⚙️ Очередь обработки запущена с {self.task_queue.max_workers} воркерами")
             

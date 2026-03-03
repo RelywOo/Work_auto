@@ -140,3 +140,11 @@ class DatabaseManager:
                 WHERE message_id = ?
             ''', (result, message_id))
             conn.commit()
+    
+    def get_topics_with_unprocessed_files(self) -> list[int]:
+        """Возвращает список уникальных topic_id, в которых есть скачанные, но еще не проанализированные ИИ файлы"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT topic_id FROM processed_messages WHERE ai_processed = 0")
+            result = cursor.fetchall()
+            return [row[0] for row in result]
