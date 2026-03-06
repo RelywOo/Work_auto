@@ -109,6 +109,17 @@ class DatabaseManager:
             )
             result = cursor.fetchone()
             return result is not None
+            
+    def get_processed_message_ids(self, topic_id: int) -> set:
+        """Возвращает множество ID всех обработанных сообщений для заданного топика"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT message_id FROM processed_messages WHERE topic_id = ?",
+                (topic_id,)
+            )
+            result = cursor.fetchall()
+            return {row[0] for row in result}
     
     def save_message(self, message_id: int, topic_id: int, message_type: str, file_path: str = None):
         """Сохраняет информацию о скачанном файле или текстовом сообщении в базу данных"""

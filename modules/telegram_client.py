@@ -139,13 +139,13 @@ class TelegramClientManager:
         
         self.logger.info(f"Найдено сообщение с текстом (ID: {message_data['id']}), сохранено.")
     
-    async def download_topic_content(self, topic_id: int, message_limit: int = 100) -> Dict[str, int]:
+    async def download_topic_content(self, topic_id: int, photo_message_limit: int = 100) -> Dict[str, int]:
         """
         Download all text messages and photos from a specific Telegram topic.
         
         Args:
             topic_id: ID of the topic to download from
-            message_limit: Maximum number of messages to process (default: 100)
+            photo_message_limit: Maximum number of messages to process for photo downloads (default: 100)
             
         Returns:
             Dict with counts: {'text_messages': X, 'photos': Y}
@@ -168,8 +168,7 @@ class TelegramClientManager:
             # Step 4: Process messages with min_id filter
             iter_params = {
                 'entity': chat,
-                'reply_to': topic_id,
-                'limit': message_limit
+                'reply_to': topic_id
             }
             
             # Add min_id if we have processed messages before
@@ -177,7 +176,12 @@ class TelegramClientManager:
                 iter_params['min_id'] = last_msg_id
                 self.logger.info(f"Использую min_id={last_msg_id} для скачивания только новых сообщений")
             
+            # Оптимизация: Получаем все обработанные ID для этого топика одним запросом
+            processed_msg_ids = self.db.get_processed_message_ids(topic_id)
+            
+            messages_iterated = 0
             async for message in self.client.iter_messages(**iter_params):
+                messages_iterated += 1
                 message_data = {
                     'id': message.id,
                     'date': message.date,
@@ -193,8 +197,8 @@ class TelegramClientManager:
                 
                 # Step 5: Handle text content
                 if message.text:
-                    # Проверяем, не было ли это текстовое сообщение уже обработано
-                    if self.db.is_message_processed(message.id):
+                    # Проверяем, не было ли это текстовое сообщение уже обработано (в памяти)
+                    if message.id in processed_msg_ids:
                         self.logger.info(f"Текстовое сообщение {message.id} уже обработано, пропускаю")
                         continue
                     
@@ -202,11 +206,12 @@ class TelegramClientManager:
                     text_count += 1
                     # Сохраняем информацию о текстовом сообщении в базу данных
                     self.db.save_message(message.id, topic_id, 'text')
+                    processed_msg_ids.add(message.id)  # Добавляем в кэш
                 
                 # Step 6: Handle media content
-                if message.media and isinstance(message.media, MessageMediaPhoto):
-                    # Проверяем, не было ли это сообщение уже обработано
-                    if self.db.is_message_processed(message.id):
+                if messages_iterated <= photo_message_limit and message.media and isinstance(message.media, MessageMediaPhoto):
+                    # Проверяем, не было ли это сообщение уже обработано (в памяти)
+                    if message.id in processed_msg_ids:
                         self.logger.info(f"Сообщение {message.id} уже обработано, пропускаю")
                         continue
                     
@@ -227,6 +232,7 @@ class TelegramClientManager:
                             self.logger.info(f"Фотография успешно скачана: {downloaded_path}")
                             # Сохраняем информацию о скачанном файле в базу данных
                             self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
+                            processed_msg_ids.add(message.id)  # Добавляем в кэш
                         
                         # Rate limiting between downloads
                         await asyncio.sleep(0.5)
@@ -243,6 +249,7 @@ class TelegramClientManager:
                             photos_count += 1
                             # Сохраняем информацию о скачанном файле в базу данных
                             self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
+                            processed_msg_ids.add(message.id)  # Добавляем в кэш
                 
                 # Small delay between processing messages
                 await asyncio.sleep(0.2)
