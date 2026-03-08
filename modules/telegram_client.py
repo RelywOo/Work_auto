@@ -297,6 +297,57 @@ class TelegramClientManager:
             self.logger.error(f"Ошибка при получении названия топика {topic_id}: {e}")
             return None
     
+    async def find_main_topic_for_vdo(self, site_id: str) -> Optional[int]:
+        """Find the main topic (without VDO/TSS/TSSR) for the given site_id."""
+        if not site_id:
+            return None
+            
+        try:
+            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            result = await self.client(GetForumTopicsRequest(
+                peer=chat,
+                q=site_id,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            ))
+            
+            if not getattr(result, 'topics', []):
+                return None
+                
+            for topic in result.topics:
+                title_upper = topic.title.upper()
+                # Check for matching site_id, but omit VDO and TSS/TSSR
+                if site_id.upper() in title_upper and 'VDO' not in title_upper and 'ВДО' not in title_upper and 'TSS' not in title_upper and 'TSSR' not in title_upper:
+                    self.logger.info(f"✅ Нашел основной топик для VDO (сайт {site_id}): {topic.title} (ID: {topic.id})")
+                    return topic.id
+                    
+            return None
+        except Exception as e:
+            self.logger.error(f"Ошибка при поиске основного топика для VDO (site_id={site_id}): {e}")
+            return None
+
+    async def get_topic_text_log(self, topic_id: int) -> str:
+        """Download text messages from the specified topic, chronologically sorted."""
+        try:
+            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            messages_text = []
+            
+            # reverse=True fetches older messages first
+            async for message in self.client.iter_messages(entity=chat, reply_to=topic_id, reverse=True):
+                if message.text:
+                    timestamp = message.date.strftime('%Y-%m-%d %H:%M:%S')
+                    log_entry = f"[{timestamp}] | [{message.id}] | {message.text}\n{'='*50}\n"
+                    messages_text.append(log_entry)
+            
+            self.logger.info(f"Собрано {len(messages_text)} текстовых сообщений из топика {topic_id}")
+            return "".join(messages_text)
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка при сборе текстовых сообщений из топика {topic_id}: {e}")
+            return ""
+    
     def should_process_topic(self, topic_title: str) -> bool:
         """Проверить, нужно ли обрабатывать этот топик."""
         if not topic_title:
@@ -461,7 +512,7 @@ class TelegramClientManager:
         
         try:
             # Выполняем восстановление перед запуском основного режима
-            await self.run_startup_recovery()
+            # TEMP_FOR_TESTING: await self.run_startup_recovery()
             self.logger.info("🔄 Процедура восстановления завершена, перехожу в режим ожидания новых сообщений...")
             
             self.logger.info("👂 Начинаю слушать сообщения 24/7...")

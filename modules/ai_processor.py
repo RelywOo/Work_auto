@@ -117,40 +117,39 @@ class AIProcessor:
             
             Ответь строго в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Название из списка демонтажа или null", "reason": "Детально объясни по визуальным признакам, почему это старое/новое"}}."""
             
-            # Загружаем изображение
-            image = Image.open(photo_path)
-            
-            try:
-                # Отправляем запрос к Gemini Vision API
-                response = self.vision_model.generate_content(
-                    [prompt, image],    
-                    generation_config=genai.types.GenerationConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1, # Понизили температуру для большей строгости
+            # Загружаем изображение через контекстный менеджер для гарантии освобождения файла
+            with Image.open(photo_path) as image:
+                try:
+                    # Отправляем запрос к Gemini Vision API
+                    response = self.vision_model.generate_content(
+                        [prompt, image],    
+                        generation_config=genai.types.GenerationConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1, # Понизили температуру для большей строгости
+                        )
                     )
-                )
-                
-                # Парсим JSON ответ
-                result = json.loads(response.text)
-                
-                # Валидация и нормализация
-                if not isinstance(result, dict):
-                    raise ValueError("Invalid response format")
-                
-                # Убедимся, что все поля присутствуют
-                result.setdefault('is_demontaj', False)
-                result.setdefault('equipment_found', None)
-                result.setdefault('reason', 'Не удалось определить')
-                
-                # Логируем результат
-                equipment_name = result['equipment_found'] or 'не определено'
-                self.logger.info(f"Анализ фото {os.path.basename(photo_path)}: демонтаж={result['is_demontaj']}, оборудование={equipment_name}. Причина: {result.get('reason')}")
-                
-                return result
-                
-            finally:
-                # Закрываем изображение для освобождения файла
-                image.close()
+                    
+                    # Парсим JSON ответ
+                    result = json.loads(response.text)
+                    
+                    # Валидация и нормализация
+                    if not isinstance(result, dict):
+                        raise ValueError("Invalid response format")
+                    
+                    # Убедимся, что все поля присутствуют
+                    result.setdefault('is_demontaj', False)
+                    result.setdefault('equipment_found', None)
+                    result.setdefault('reason', 'Не удалось определить')
+                    
+                    # Логируем результат
+                    equipment_name = result['equipment_found'] or 'не определено'
+                    self.logger.info(f"Анализ фото {os.path.basename(photo_path)}: демонтаж={result['is_demontaj']}, оборудование={equipment_name}. Причина: {result.get('reason')}")
+                    
+                    return result
+                    
+                except Exception as e:
+                    self.logger.error(f"Ошибка при анализе содержимого изображения {photo_path}: {e}")
+                    raise
             
         except FileNotFoundError as e:
             self.logger.error(str(e))

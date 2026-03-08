@@ -5,7 +5,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
-from modules.utils import extract_site_id, create_readme_file, create_zip_report
+from modules.utils import extract_site_id, create_readme_file, create_zip_report, safe_rmtree
 
 class TaskQueue:
     """Асинхронная очередь задач для обработки топиков (Producer-Consumer архитектура)."""
@@ -139,6 +139,14 @@ class TaskQueue:
                 # Извлекаем ID сайта
                 site_id = extract_site_id(topic_title)
                 
+                # Детекция VDO-топика
+                topic_title_upper = topic_title.upper()
+                is_vdo = 'VDO' in topic_title_upper or 'ВДО' in topic_title_upper
+                
+                demontaj_count = 0
+                montaj_count = 0
+                unknown_count = 0
+                
                 # === ИНТЕГРАЦИЯ ИИ-ОБРАБОТКИ И СОРТИРОВКИ ===
                 try:
                     # Инициализируем ИИ-процессор
@@ -147,10 +155,6 @@ class TaskQueue:
                     
                     if unprocessed_files:
                         self.logger.info(f"🤖 Найдено {len(unprocessed_files)} файлов для ИИ-обработки")
-                        
-                        # Детекция VDO-топика
-                        topic_title_upper = topic_title.upper()
-                        is_vdo = 'VDO' in topic_title_upper or 'ВДО' in topic_title_upper
                         
                         # Извлекаем списки оборудования из лога
                         topic_dir = os.path.join('downloads', f'topic_{topic_id}')
@@ -161,47 +165,60 @@ class TaskQueue:
                             # Если текст есть - парсим как обычно
                             equipment_lists = ai_processor.extract_equipment_lists(log_file_path)
                             
-                            # === ДОБАВЛЕННАЯ ВАЛИДАЦИЯ СПИСКОВ ===
-                            # Проверяем, является ли топик VDO (для них пустые списки - норма)
-                            is_vdo_topic = 'VDO' in topic_title.upper() or 'ВДО' in topic_title.upper()
-                            
-                            if not is_vdo_topic:
-                                # Проверяем, пусты ли списки оборудования
-                                has_montaj = bool(equipment_lists.get('montaj'))
-                                has_demontaj = bool(equipment_lists.get('demontaj'))
-                                
-                                self.logger.info(f"🔍 Проверка списков оборудования: монтаж={len(equipment_lists.get('montaj', []))}, демонтаж={len(equipment_lists.get('demontaj', []))}")
-                                
+                        has_montaj = bool(equipment_lists.get('montaj'))
+                        has_demontaj = bool(equipment_lists.get('demontaj'))
+                        
+                        # Fallback for VDO topics
+                        if is_vdo and not (has_montaj or has_demontaj):
+                            self.logger.info(f"🔍 В VDO топике не нашли списков (или лог пуст). Ищем основной топик для сайта {site_id}...")
+                            try:
+                                main_topic_future = asyncio.run_coroutine_threadsafe(
+                                    telegram_client.find_main_topic_for_vdo(site_id),
+                                    self.main_loop
+                                )
+                                main_topic_id = main_topic_future.result(timeout=30)
+                                if main_topic_id:
+                                    self.logger.info(f"Основной топик найден (ID: {main_topic_id}). Скачиваем текстовые логи...")
+                                    text_log_future = asyncio.run_coroutine_threadsafe(
+                                        telegram_client.get_topic_text_log(main_topic_id),
+                                        self.main_loop
+                                    )
+                                    text_log = text_log_future.result(timeout=120)
+                                    if text_log:
+                                        with open(log_file_path, 'w', encoding='utf-8') as f:
+                                            f.write(text_log)
+                                        self.logger.info(f"Текстовые логи перезаписаны из основного топика. Повторный запуск извлечения...")
+                                        equipment_lists = ai_processor.extract_equipment_lists(log_file_path)
+                                        has_montaj = bool(equipment_lists.get('montaj'))
+                                        has_demontaj = bool(equipment_lists.get('demontaj'))
+                            except Exception as e:
+                                self.logger.error(f"❌ Ошибка при поиске/загрузке основного топика: {e}")
+
+                        # === ВАЛИДАЦИЯ СПИСКОВ ===
+                        if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
+                            if not is_vdo:
                                 if not has_montaj and not has_demontaj:
                                     error_msg = f"🚨 Внимание! В топике '{topic_title}' не найдены списки монтажа/демонтажа. Обработка остановлена. Пожалуйста, проверьте топик вручную."
                                     self.logger.warning(error_msg)
                                     
-                                    # Отправляем сообщение в Избранное (Saved Messages)
                                     try:
                                         self.logger.info("Попытка отправить уведомление в Telegram")
                                         asyncio.run_coroutine_threadsafe(
                                             telegram_client.client.send_message('me', error_msg),
                                             self.main_loop
-                                        ).result(timeout=10)  # Добавляем таймаут для ожидания результата отправки
+                                        ).result(timeout=10)
                                         self.logger.info("Уведомление успешно отправлено в Telegram.")
                                     except Exception as e:
                                         self.logger.error(f"Не удалось отправить уведомление в Telegram: {e}")
                                         
-                                    return  # Прерываем обработку этого топика, так как ИИ нечего искать
+                                    return
                                 else:
                                     self.logger.info(f"✅ Списки оборудования найдены, продолжаем обработку")
                             else:
-                                # VDO топик - тоже проверяем пустые списки и уведомляем
-                                has_montaj = bool(equipment_lists.get('montaj'))
-                                has_demontaj = bool(equipment_lists.get('demontaj'))
-                                
-                                self.logger.info(f"🔍 VDO: Проверка списков оборудования: монтаж={len(equipment_lists.get('montaj', []))}, демонтаж={len(equipment_lists.get('demontaj', []))}")
-                                
                                 if not has_montaj and not has_demontaj:
                                     error_msg = f"🚨 Внимание! (VDO топик) В топике '{topic_title}' не найдены списки монтажа/демонтажа. Пожалуйста, проверьте топик вручную."
                                     self.logger.warning(error_msg)
                                     
-                                    # Отправляем сообщение в Избранное (Saved Messages)
                                     try:
                                         self.logger.info("Попытка отправить уведомление в Telegram (VDO)")
                                         asyncio.run_coroutine_threadsafe(
@@ -211,13 +228,11 @@ class TaskQueue:
                                         self.logger.info("Уведомление успешно отправлено в Telegram.")
                                     except Exception as e:
                                         self.logger.error(f"Не удалось отправить уведомление в Telegram: {e}")
-                            # =====================================
                         else:
                             if is_vdo:
                                 self.logger.info(f"ℹ️ VDO топик без текстового отчета. Продолжаем работу.")
                                 
-                                # Уведомляем в ЛС о VDO топике без текстового лога
-                                error_msg = f"🚨 Внимание! (VDO топик) В топике '{topic_title}' отсутствует текстовый лог с списками оборудования. Пожалуйста, проверьте топик вручную."
+                                error_msg = f"🚨 Внимание! (VDO топик) В топике '{topic_title}' отсутствует текстовый лог с списками оборудования даже после поиска. Пожалуйста, проверьте топик вручную."
                                 self.logger.warning(error_msg)
                                 
                                 try:
@@ -236,18 +251,17 @@ class TaskQueue:
                                 error_msg = f"🚨 Внимание! В топике '{topic_title}' отсутствует текстовый лог с списками оборудования. Обработка остановлена. Пожалуйста, проверьте топик вручную."
                                 self.logger.warning(error_msg)
                                 
-                                # Отправляем сообщение в Избранное (Saved Messages)
                                 try:
                                     self.logger.info("Попытка отправить уведомление в Telegram")
                                     asyncio.run_coroutine_threadsafe(
                                         telegram_client.client.send_message('me', error_msg),
                                         self.main_loop
-                                    ).result(timeout=10)  # Добавляем таймаут для ожидания результата отправки
+                                    ).result(timeout=10)
                                     self.logger.info("Уведомление успешно отправлено в Telegram.")
                                 except Exception as e:
                                     self.logger.error(f"Не удалось отправить уведомление в Telegram: {e}")
                                     
-                                return  # Прерываем обработку этого топика, так как ИИ нечего искать
+                                return
                         
                         # Создаем папки для сортировки
                         montaj_dir = os.path.join(topic_dir, 'Montaj')
@@ -261,8 +275,8 @@ class TaskQueue:
                         # Обрабатываем каждый файл
                         for message_id, file_path in unprocessed_files:
                             try:
-                                # Вариант А: Если это VDO и нет текста, сразу в демонтаж без ИИ
-                                if is_vdo and not os.path.exists(log_file_path) or (os.path.exists(log_file_path) and os.path.getsize(log_file_path) == 0):
+                                # Вариант А: Если это VDO, сразу в демонтаж без ИИ
+                                if is_vdo:
                                     ai_result = 'demontaj'
                                     target_dir = demontaj_dir
                                     self.logger.info(f"🚀 VDO топик: файл {os.path.basename(file_path)} сразу направлен в демонтаж")
@@ -335,14 +349,34 @@ class TaskQueue:
                 
                 # Создаем ZIP-архив
                 output_folder = "output"
-                zip_path = create_zip_report(site_id, topic_dir, output_folder)
+                zip_path = create_zip_report(site_id, topic_dir, output_folder, topic_title)
                 self.logger.info(f"📦 ZIP-архив создан: {zip_path}")
+                
+                # === Отправка архива в Telegram ===
+                try:
+                    vdo_info = "VDO" if is_vdo else "не VDO"
+                    summary = f"Сайт {site_id} ({vdo_info}) обработан✅. "
+                    if demontaj_count > 0 or montaj_count > 0 or unknown_count > 0:
+                        total = demontaj_count + montaj_count + unknown_count
+                        recog_pct = int(((demontaj_count + montaj_count) / total) * 100) if total > 0 else 0
+                        summary += f"Найдено {demontaj_count} фото демонтажа, {montaj_count} монтажа. Распознано {recog_pct}% оборудования."
+                    else:
+                        summary += "Новых фото для обработки не было."
+                        
+                    self.logger.info(f"📤 Отправляем ZIP-архив в Telegram ({zip_path})...")
+                    asyncio.run_coroutine_threadsafe(
+                        telegram_client.client.send_file('me', file=zip_path, caption=summary),
+                        self.main_loop
+                    ).result(timeout=60)
+                    self.logger.info("✅ ZIP-архив успешно отправлен.")
+                except Exception as tg_error:
+                    self.logger.error(f"❌ Ошибка отправки ZIP-архива в Telegram: {tg_error}")
                 
                 # === ТОТАЛЬНАЯ ЗАЧИСТКА (Garbage Collection) ===
                 try:
                     self.logger.info(f"🧹 Начинаю удаление временной папки со всеми фото: {topic_dir}")
-                    # shutil.rmtree удаляет папку и абсолютно всё её содержимое
-                    shutil.rmtree(topic_dir)
+                    # Используем безопасное удаление с ретраями для Windows
+                    safe_rmtree(topic_dir)
                     self.logger.info(f"✅ Зачистка завершена. На диске остался только архив: {zip_path}")
                 except Exception as cleanup_error:
                     # Если вдруг какой-то файл занят системой и не удаляется, 
