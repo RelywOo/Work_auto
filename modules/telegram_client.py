@@ -1,5 +1,6 @@
 import os
 import asyncio
+import getpass
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events
@@ -9,6 +10,7 @@ import logging
 from telethon.tl.functions.messages import GetForumTopicsRequest
 from modules.task_queue import TaskQueue
 from modules.database import DatabaseManager
+import time
 
 class TelegramClientManager:
     def __init__(self):
@@ -20,8 +22,10 @@ class TelegramClientManager:
         self.logger = logging.getLogger(__name__)
         self.active_topics = {}  # Для отслеживания активных топиков и таймеров
         self.wait_time = int(os.getenv('WAIT_TIME', '300'))  # 5 минут по умолчанию
-        self.task_queue = TaskQueue(max_workers=2, telegram_client=self)  # Передаем себя в очередь
+        max_workers = int(os.getenv('MAX_WORKERS', '2'))
+        self.task_queue = TaskQueue(max_workers=max_workers, telegram_client=self)  # Передаем себя в очередь
         self.db = DatabaseManager()  # Инициализация базы данных
+        self._topic_cache = {}  # topic_id -> (title, expiry_time)
     
     async def connect(self):
         """Connect to Telegram and authenticate if needed."""
@@ -42,7 +46,7 @@ class TelegramClientManager:
                     # Try to get password from environment variable first
                     password = os.getenv('TELEGRAM_2FA_PASSWORD')
                     if not password:
-                        password = input("Enter your 2FA password: ")
+                        password = getpass.getpass("Enter your 2FA password: ")
                     
                     await self.client.sign_in(password=password)
                 
@@ -120,7 +124,8 @@ class TelegramClientManager:
     
     def _create_topic_folder(self, topic_id: int) -> str:
         """Create folder for topic downloads."""
-        download_dir = os.path.join(os.getenv('DOWNLOADS_DIR', 'downloads'), f"topic_{topic_id}")
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        download_dir = os.path.join(base_dir, os.getenv('DOWNLOADS_DIR', 'downloads'), f"topic_{topic_id}")
         os.makedirs(download_dir, exist_ok=True)
         self.logger.info(f"Создана папка для топика: {download_dir}")
         return download_dir
@@ -221,35 +226,30 @@ class TelegramClientManager:
                     file_name = f"photo_{message.id}.jpg"
                     file_path = os.path.join(topic_dir, file_name)
                     
-                    try:
-                        downloaded_path = await self.client.download_media(
-                            message,
-                            file=file_path
-                        )
-                        
-                        if downloaded_path:
-                            photos_count += 1
-                            self.logger.info(f"Фотография успешно скачана: {downloaded_path}")
-                            # Сохраняем информацию о скачанном файле в базу данных
-                            self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
-                            processed_msg_ids.add(message.id)  # Добавляем в кэш
-                        
-                        # Rate limiting between downloads
-                        await asyncio.sleep(0.5)
-                        
-                    except FloodWaitError as e:
-                        self.logger.warning(f"Flood wait: {e.seconds} секунд")
-                        await asyncio.sleep(e.seconds)
-                        # Retry download after wait
-                        downloaded_path = await self.client.download_media(
-                            message,
-                            file=file_path
-                        )
-                        if downloaded_path:
-                            photos_count += 1
-                            # Сохраняем информацию о скачанном файле в базу данных
-                            self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
-                            processed_msg_ids.add(message.id)  # Добавляем в кэш
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            downloaded_path = await self.client.download_media(
+                                message,
+                                file=file_path
+                            )
+                            
+                            if downloaded_path:
+                                photos_count += 1
+                                self.logger.info(f"Фотография успешно скачана: {downloaded_path}")
+                                # Сохраняем информацию о скачанном файле в базу данных
+                                self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
+                                processed_msg_ids.add(message.id)  # Добавляем в кэш
+                            
+                            # Rate limiting between downloads
+                            await asyncio.sleep(0.5)
+                            break  # Успешно, выходим из цикла
+                            
+                        except FloodWaitError as e:
+                            self.logger.warning(f"Flood wait (попытка {attempt+1}/{max_retries}): {e.seconds} секунд")
+                            await asyncio.sleep(e.seconds)
+                            if attempt == max_retries - 1:
+                                self.logger.error(f"Превышено количество попыток при скачивании фото: {message.id}")
                 
                 # Small delay between processing messages
                 await asyncio.sleep(0.2)
@@ -276,6 +276,16 @@ class TelegramClientManager:
     
     async def get_topic_title_by_id(self, topic_id: int) -> Optional[str]:
         """Получить название топика по его ID."""
+        now = time.time()
+        
+        # Проверяем кэш
+        if topic_id in self._topic_cache:
+            title, expiry = self._topic_cache[topic_id]
+            if now < expiry:
+                return title
+            else:
+                del self._topic_cache[topic_id]
+
         try:
             chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
             # Получаем топик по ID
@@ -288,9 +298,12 @@ class TelegramClientManager:
                 limit=100
             ))
             
+            # Кэшируем все полученные топики на 1 час (3600 секунд)
             for topic in topics_result.topics:
-                if topic.id == topic_id:
-                    return topic.title
+                self._topic_cache[topic.id] = (topic.title, now + 3600)
+                
+            if topic_id in self._topic_cache:
+                return self._topic_cache[topic_id][0]
             
             return None
         except Exception as e:
@@ -359,7 +372,7 @@ class TelegramClientManager:
     
     async def reset_topic_timer(self, topic_id: int, topic_title: str):
         """Сбросить таймер для топика или создать новый."""
-        # Если уже есть активный таймер, отменяем его
+        # Если уже есть активный таймер, обновляем время последнего сообщения
         if topic_id in self.active_topics:
             self.active_topics[topic_id]['last_message_time'] = datetime.now()
             self.logger.info(f"🔄 Таймер для топика {topic_title} (ID: {topic_id}) сброшен")
@@ -382,27 +395,28 @@ class TelegramClientManager:
     async def _topic_timer_handler(self, topic_id: int):
         """Обработчик таймера для топика."""
         try:
-            await asyncio.sleep(self.wait_time)
-            
-            # Проверяем, что топик все еще активен
-            if topic_id not in self.active_topics:
-                return
-            
-            # Проверяем, не было ли новых сообщений
-            last_message_time = self.active_topics[topic_id]['last_message_time']
-            time_since_last = datetime.now() - last_message_time
-            
-            if time_since_last >= timedelta(seconds=self.wait_time):
-                # Таймер истек, начинаем обработку
-                topic_title = self.active_topics[topic_id]['title']
-                self.logger.info(f"⏰ Таймер для топика {topic_title} (ID: {topic_id}) истек, начинаю сбор данных")
+            while True:
+                # Проверяем, что топик все еще активен
+                if topic_id not in self.active_topics:
+                    return
                 
-                # Удаляем из активных и добавляем в очередь
-                del self.active_topics[topic_id]
-                await self.add_topic_to_queue(topic_id)
-            else:
-                # Были новые сообщения, сбрасываем таймер
-                await self.reset_topic_timer(topic_id, self.active_topics[topic_id]['title'])
+                last_message_time = self.active_topics[topic_id]['last_message_time']
+                time_since_last = datetime.now() - last_message_time
+                wait_duration = timedelta(seconds=self.wait_time)
+                
+                if time_since_last >= wait_duration:
+                    # Таймер истек, начинаем обработку
+                    topic_title = self.active_topics[topic_id]['title']
+                    self.logger.info(f"⏰ Таймер для топика {topic_title} (ID: {topic_id}) истек, начинаю сбор данных")
+                    
+                    # Удаляем из активных и добавляем в очередь
+                    del self.active_topics[topic_id]
+                    await self.add_topic_to_queue(topic_id)
+                    break
+                else:
+                    # Ждем оставшееся время
+                    sleep_time = (wait_duration - time_since_last).total_seconds()
+                    await asyncio.sleep(sleep_time)
                 
         except asyncio.CancelledError:
             self.logger.debug(f"Таймер для топика {topic_id} отменен")
@@ -498,6 +512,25 @@ class TelegramClientManager:
                 self.logger.error(f"Ошибка в обработчике новых сообщений: {e}")
         
         self.logger.info("🎯 Event handler настроен для отслеживания новых сообщений")
+
+    async def _healthcheck_loop(self):
+        """Периодическая отправка healthcheck сообщений."""
+        healthcheck_interval = int(os.getenv('HEALTHCHECK_INTERVAL', '3600'))  # 1 час по умолчанию
+        while True:
+            try:
+                await asyncio.sleep(healthcheck_interval)
+                # Получаем количество обработанных топиков
+                topics = self.db.get_all_topics()
+                count = len(topics) if topics else 0
+                message = f"🟢 Бот жив. Обработано топиков: {count}."
+                self.logger.info(f"Отправка healthcheck: {message}")
+                await self.client.send_message('me', message)
+            except asyncio.CancelledError:
+                self.logger.debug("Healthcheck loop отменен")
+                break
+            except Exception as e:
+                self.logger.error(f"Ошибка в healthcheck лоопе: {e}")
+                await asyncio.sleep(60)
     
     async def start_autonomous_mode(self):
         """Запустить автономный режим работы."""
@@ -510,9 +543,12 @@ class TelegramClientManager:
         # Запускаем Consumer для обработки очереди в фоновом режиме
         asyncio.create_task(self.task_queue.start_consumer())
         
+        # Запускаем Healthcheck loop
+        healthcheck_task = asyncio.create_task(self._healthcheck_loop())
+        
         try:
             # Выполняем восстановление перед запуском основного режима
-            # TEMP_FOR_TESTING: await self.run_startup_recovery()
+            await self.run_startup_recovery()
             self.logger.info("🔄 Процедура восстановления завершена, перехожу в режим ожидания новых сообщений...")
             
             self.logger.info("👂 Начинаю слушать сообщения 24/7...")
@@ -526,6 +562,7 @@ class TelegramClientManager:
         except Exception as e:
             self.logger.error(f"Ошибка в автономном режиме: {e}")
         finally:
-            # Останавливаем очередь
+            # Останавливаем очередь и healthcheck
+            healthcheck_task.cancel()
             await self.task_queue.shutdown()
             await self.disconnect()

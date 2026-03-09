@@ -5,6 +5,7 @@ import logging
 import shutil
 from typing import Dict, List, Any
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 from PIL import Image
 
 class AIProcessor:
@@ -21,6 +22,20 @@ class AIProcessor:
         
         self.logger.info("AI Processor initialized with Gemini API")
     
+    def _generate_with_retry(self, model, *args, **kwargs):
+        """Обертка для вызова API с retry при Rate Limits (429)."""
+        max_retries = 5
+        base_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                return model.generate_content(*args, **kwargs)
+            except ResourceExhausted as e:
+                if attempt == max_retries - 1:
+                    self.logger.error(f"Rate limit exceeded after {max_retries} retries: {e}")
+                    raise
+                delay = base_delay * (2 ** attempt)
+                self.logger.warning(f"Rate limit hit. Retrying in {delay}s (Attempt {attempt + 1}/{max_retries})...")
+                time.sleep(delay)
     def extract_equipment_lists(self, log_file_path: str) -> Dict[str, List[str]]:
         """
         Извлекает списки оборудования для монтажа и демонтажа из лога сообщений.
@@ -43,8 +58,9 @@ class AIProcessor:
             Пример ответа: {"demontaj": ["Anten T1003M6R011", "DCDU12B"], "montaj": ["RRU 5516"]}. 
             Если списков нет, верни пустые массивы."""
             
-            # Отправляем запрос к Gemini
-            response = self.text_model.generate_content(
+            # Отправляем запрос к Gemini с retry
+            response = self._generate_with_retry(
+                self.text_model,
                 prompt + "\n\nЛог сообщений:\n" + log_content,
                 generation_config=genai.types.GenerationConfig(
                     response_mime_type="application/json",
@@ -120,8 +136,9 @@ class AIProcessor:
             # Загружаем изображение через контекстный менеджер для гарантии освобождения файла
             with Image.open(photo_path) as image:
                 try:
-                    # Отправляем запрос к Gemini Vision API
-                    response = self.vision_model.generate_content(
+                    # Отправляем запрос к Gemini Vision API с retry
+                    response = self._generate_with_retry(
+                        self.vision_model,
                         [prompt, image],    
                         generation_config=genai.types.GenerationConfig(
                             response_mime_type="application/json",
@@ -161,42 +178,4 @@ class AIProcessor:
             self.logger.error(f"Ошибка при анализе фотографии {photo_path}: {e}")
             return {"is_demontaj": False, "equipment_found": None, "reason": "Техническая ошибка"}
     
-    def process_photos_batch(self, photo_dir: str, demontaj_list: List[str], montaj_list: List[str], delay_seconds: int = 2) -> List[Dict[str, Any]]:
-        """
-        Обрабатывает все фотографии в директории с задержкой между запросами.
-        
-        Args:
-            photo_dir: Директория с фотографиями
-            demontaj_list: Список оборудования для демонтажа
-            montaj_list: Список оборудования для монтажа
-            delay_seconds: Задержка между запросами в секундах
-            
-        Returns:
-            Список результатов анализа для каждой фотографии
-        """
-        results = []
-        
-        # Ищем все файлы изображений
-        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
-        photo_files = []
-        
-        for filename in os.listdir(photo_dir):
-            if any(filename.lower().endswith(ext) for ext in image_extensions):
-                photo_files.append(os.path.join(photo_dir, filename))
-        
-        self.logger.info(f"Найдено {len(photo_files)} фотографий для анализа")
-        
-        for i, photo_path in enumerate(photo_files, 1):
-            self.logger.info(f"Анализирую фото {i}/{len(photo_files)}: {os.path.basename(photo_path)}")
-            
-            result = self.analyze_photo(photo_path, demontaj_list, montaj_list) # добавили аргумент
-            result['photo_path'] = photo_path
-            result['filename'] = os.path.basename(photo_path)
-            results.append(result)
-            
-            # Задержка между запросами для избежания rate limits
-            if i < len(photo_files):
-                time.sleep(delay_seconds)
-        
-        return results
 

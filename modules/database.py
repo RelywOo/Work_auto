@@ -3,16 +3,29 @@ import os
 import logging
 from datetime import datetime
 from typing import Optional
+import threading
+from contextlib import contextmanager
 
 class DatabaseManager:
     def __init__(self, db_path: str = "bot_memory.db"):
         self.db_path = db_path
         self.logger = logging.getLogger(__name__)
+        self.lock = threading.Lock()
         self.init_db()
+        
+    @contextmanager
+    def _get_connection(self):
+        with self.lock:
+            with sqlite3.connect(self.db_path, timeout=20.0) as conn:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except Exception as e:
+                    self.logger.warning(f"Failed to enable WAL mode: {e}")
+                yield conn
     
     def init_db(self):
         """Создает файл БД и таблицы processed_topics и processed_messages, если их нет"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS processed_topics (
@@ -30,6 +43,11 @@ class DatabaseManager:
                     file_path TEXT, -- Nullable for text messages
                     downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+            ''')
+            
+            # Индекс для ускорения запросов по конкретному топику (get_unprocessed_files, get_processed_message_ids)
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_messages_topic ON processed_messages(topic_id)
             ''')
             
             # Миграция для существующих БД: добавляем колонку message_type если её нет
@@ -60,7 +78,7 @@ class DatabaseManager:
     
     def get_last_msg_id(self, topic_id: int) -> Optional[int]:
         """Возвращает last_msg_id для топика, либо None, если топик новый"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT last_msg_id FROM processed_topics WHERE topic_id = ?",
@@ -71,7 +89,7 @@ class DatabaseManager:
     
     def update_topic(self, topic_id: int, title: str, last_msg_id: int):
         """Добавляет новый топик в базу или обновляет last_msg_id у существующего"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO processed_topics 
@@ -80,28 +98,9 @@ class DatabaseManager:
             ''', (topic_id, title, last_msg_id))
             conn.commit()
     
-    def get_topic_info(self, topic_id: int) -> Optional[tuple]:
-        """Возвращает полную информацию о топике"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT topic_id, title, last_msg_id, updated_at FROM processed_topics WHERE topic_id = ?",
-                (topic_id,)
-            )
-            return cursor.fetchone()
-    
-    def get_all_topics(self) -> list:
-        """Возвращает все обработанные топики"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT topic_id, title, last_msg_id, updated_at FROM processed_topics ORDER BY updated_at DESC"
-            )
-            return cursor.fetchall()
-    
     def is_message_processed(self, message_id: int) -> bool:
         """Проверяет, было ли сообщение уже обработано (скачано)"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT message_id FROM processed_messages WHERE message_id = ?",
@@ -112,7 +111,7 @@ class DatabaseManager:
             
     def get_processed_message_ids(self, topic_id: int) -> set:
         """Возвращает множество ID всех обработанных сообщений для заданного топика"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT message_id FROM processed_messages WHERE topic_id = ?",
@@ -123,7 +122,7 @@ class DatabaseManager:
     
     def save_message(self, message_id: int, topic_id: int, message_type: str, file_path: str = None):
         """Сохраняет информацию о скачанном файле или текстовом сообщении в базу данных"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO processed_messages (message_id, topic_id, message_type, file_path)
@@ -133,7 +132,7 @@ class DatabaseManager:
     
     def get_unprocessed_files(self, topic_id: int) -> list[tuple]:
         """Возвращает список необработанных ИИ файлов для топика"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT message_id, file_path FROM processed_messages 
@@ -143,7 +142,7 @@ class DatabaseManager:
     
     def update_ai_result(self, message_id: int, result: str):
         """Обновляет результат ИИ-обработки для сообщения"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE processed_messages 
@@ -152,10 +151,19 @@ class DatabaseManager:
             ''', (result, message_id))
             conn.commit()
     
+    def get_all_topics(self) -> list:
+        """Возвращает все обработанные топики"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT topic_id, title, last_msg_id, updated_at FROM processed_topics ORDER BY updated_at DESC"
+            )
+            return cursor.fetchall()
+
     def get_topics_with_unprocessed_files(self) -> list[int]:
         """Возвращает список уникальных topic_id, в которых есть скачанные, но еще не проанализированные ИИ файлы"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT topic_id FROM processed_messages WHERE ai_processed = 0")
+            cursor.execute("SELECT DISTINCT topic_id FROM processed_messages WHERE ai_processed = 0 AND file_path IS NOT NULL")
             result = cursor.fetchall()
             return [row[0] for row in result]

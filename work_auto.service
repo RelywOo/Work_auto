@@ -1,0 +1,15 @@
+[Unit]
+Description=Work_auto Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/path/to/Work_auto
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
