@@ -1,6 +1,4 @@
 import pytest
-import sqlite3
-import os
 from modules.database import DatabaseManager
 
 @pytest.fixture

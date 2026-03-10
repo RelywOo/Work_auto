@@ -25,7 +25,6 @@ pip install -r requirements.txt
      - `TELEGRAM_API_ID` - ваш API ID от Telegram
      - `TELEGRAM_API_HASH` - ваш API Hash от Telegram
      - `TELEGRAM_PHONE_NUMBER` - ваш номер телефона
-     - `TELEGRAM_2FA_PASSWORD` - пароль 2FA (если включен)
      - `TARGET_CHAT_ID` - ID супергруппы для отслеживания
      - `GEMINI_API_KEY` - API ключ для Google Gemini (обязательно для ИИ-анализа)
      - `WAIT_TIME` - время ожидания загрузки (секунд, по умолчанию 300)

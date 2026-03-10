@@ -77,7 +77,7 @@ async def test_reset_topic_timer(mock_client_manager):
     # After expiration, the topic should be removed from active lists 
     # and moved to the processing queue.
     assert topic_id not in mock_client_manager.active_topics
-    mock_client_manager.add_topic_to_queue.assert_called_once_with(topic_id)
+    mock_client_manager.add_topic_to_queue.assert_called_once_with(topic_id, topic_title=topic_title)
 
 @pytest.mark.asyncio
 async def test_get_topic_title_by_id_cache(mock_client_manager):

@@ -1,4 +1,3 @@
-import pytest
 import os
 import zipfile
 from modules.utils import extract_site_id, create_readme_file, create_zip_report

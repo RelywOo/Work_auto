@@ -11,15 +11,22 @@ __pycache__/
 # Логи
 logs/
 *.log
-swap_automator.log
 
 # Данные и временные файлы
 downloads/
 output/
 *.db
+*.db-shm
+*.db-wal
+*.sqlite3
 *.txt
 
-# Виртуальное окружение (если появится в будущем)
+# Тесты и покрытие кода
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Виртуальное окружение
 venv/
 .venv/
 env/
@@ -27,3 +34,11 @@ env/
 # Системные файлы
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Настройки редакторов (IDE)
+.idea/
+.vscode/
+*.swp
+
+.claude

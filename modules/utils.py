@@ -9,16 +9,14 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 def extract_site_id(topic_title: str) -> str:
-    """Извлекает чистый ID сайта из названия топика с помощью regex."""
+    """Extract clean site ID from topic title using regex."""
     match = re.search(r'(UA|UB)\d+', topic_title)
     if match:
         return match.group(0)
     return f"topic_{topic_title}" if topic_title else "unknown"
 
 def safe_rmtree(path: str, retries: int = 5, delay: float = 1.0):
-    """
-    Robust folder deletion with retries and permission handling (for Windows WinError 5).
-    """
+    """Robust folder deletion with retries and permission handling (for Windows WinError 5)."""
     if not os.path.exists(path):
         return
 
@@ -29,84 +27,79 @@ def safe_rmtree(path: str, retries: int = 5, delay: float = 1.0):
 
     for i in range(retries):
         try:
-            # Attempt to delete the directory tree
             shutil.rmtree(path, onerror=on_error)
-            logger.info(f"✅ Успешно удалена папка: {path}")
+            logger.info(f"✅ Successfully deleted folder: {path}")
             return
         except Exception as e:
             if i < retries - 1:
-                logger.warning(f"⚠️ Попытка {i+1} удалить {path} не удалась ({e}). Ждем {delay}с...")
+                logger.warning(f"⚠️ Attempt {i+1} to delete {path} failed ({e}). Waiting {delay}s...")
                 time.sleep(delay)
             else:
-                logger.error(f"❌ Не удалось окончательно удалить папку {path} после {retries} попыток: {e}")
+                logger.error(f"❌ Failed to delete folder {path} after {retries} attempts: {e}")
 
 def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]], text_messages: List[str]) -> str:
-    """Создает файл README.txt с отчетом о демонтаже/монтаже."""
+    """Create README.txt report with equipment lists and messages."""
     readme_path = os.path.join(topic_dir, 'README.txt')
-    
+
     with open(readme_path, 'w', encoding='utf-8') as f:
+        # User-facing report content (Russian)
         f.write("ОТЧЕТ О РАБОТАХ ПО САЙТУ\n")
         f.write("=" * 40 + "\n\n")
-        
+
         if equipment_lists['demontaj']:
             f.write("ОБОРУДОВАНИЕ НА ДЕМОНТАЖ:\n")
             for item in equipment_lists['demontaj']:
                 f.write(f"- {item}\n")
             f.write("\n")
-        
+
         if equipment_lists['montaj']:
             f.write("ОБОРУДОВАНИЕ НА МОНТАЖ:\n")
             for item in equipment_lists['montaj']:
                 f.write(f"- {item}\n")
             f.write("\n")
-        
+
         if text_messages:
             f.write("ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ:\n")
             f.write("-" * 30 + "\n")
             for msg in text_messages:
                 f.write(f"{msg}")
-    
+
     return readme_path
 
 def create_zip_report(site_id: str, source_folder: str, output_folder: str, topic_title: str) -> str:
-    """Создает ZIP-архив с фото из папки Demontaj и README.txt."""
-    # Создаем выходную папку если ее нет
+    """Create a ZIP archive with Demontaj photos and README.txt."""
     os.makedirs(output_folder, exist_ok=True)
-    
-    # Решение: Добавлять суффикс в зависимости от типа топика
+
+    # Add suffix based on topic type
     topic_title_upper = topic_title.upper()
     suffix = "_VDO" if "VDO" in topic_title_upper or "ВДО" in topic_title_upper else "_MAIN"
-    
-    # Путь к архиву
+
     zip_path = os.path.join(output_folder, f"{site_id}{suffix}")
-    
-    # Временная папка для содержимого архива
+
+    # Temporary folder for archive contents
     temp_folder = os.path.join(source_folder, "temp_zip_content")
     os.makedirs(temp_folder, exist_ok=True)
-    
+
     try:
-        # Копируем папку Demontaj если она существует
+        # Copy Demontaj folder if it exists
         demontaj_folder = os.path.join(source_folder, "Demontaj")
         if os.path.exists(demontaj_folder):
             shutil.copytree(demontaj_folder, os.path.join(temp_folder, "Demontaj"))
-        
-        # Копируем README.txt если он существует
+
+        # Copy README.txt if it exists
         readme_path = os.path.join(source_folder, "README.txt")
         if os.path.exists(readme_path):
             shutil.copy2(readme_path, temp_folder)
-        
-        # Создаем ZIP-архив
+
         shutil.make_archive(zip_path, 'zip', temp_folder)
-        
-        # Удаляем временную папку
+
         safe_rmtree(temp_folder)
-        
-        logger.info(f"ZIP-архив создан: {zip_path}.zip")
+
+        logger.info(f"ZIP archive created: {zip_path}.zip")
         return f"{zip_path}.zip"
-        
+
     except Exception as e:
-        # Удаляем временную папку в случае ошибки
         if os.path.exists(temp_folder):
             safe_rmtree(temp_folder)
-        logger.error(f"Ошибка при создании ZIP-архива: {e}")
+        logger.error(f"Error creating ZIP archive: {e}")
         raise

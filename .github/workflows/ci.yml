@@ -28,6 +28,15 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+        pip install ruff bandit
+
+    - name: Lint with ruff
+      run: |
+        ruff check . --output-format=github
+
+    - name: Security check with bandit
+      run: |
+        bandit -r modules/ main.py -s B101 --format txt
 
     - name: Run tests with pytest
       run: |

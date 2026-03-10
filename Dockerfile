@@ -28,5 +28,13 @@ RUN mkdir -p /app/downloads /app/output /app/logs
 # Копируем исходный код бота в контейнер
 COPY . .
 
+# Создаем непривилегированного пользователя и выдаем права
+RUN useradd -m -r botuser && chown -R botuser:botuser /app
+USER botuser
+
+# Проверка здоровья: файл healthcheck должен обновляться каждые 30 сек
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import os, time; assert time.time() - os.path.getmtime('/app/healthcheck') < 120" || exit 1
+
 # Указываем команду для запуска
 CMD ["python", "main.py"]

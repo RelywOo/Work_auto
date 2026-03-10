@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - TZ=Europe/Kiev
     volumes:
       # Прокидываем базу данных и сессию, чтобы не терять при перезапуске
       - ./bot_memory.db:/app/bot_memory.db
@@ -20,4 +22,4 @@ services:
       resources:
         limits:
           memory: 1G
-          cpus: '0.5'
+          cpus: '1.0'

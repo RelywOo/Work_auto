@@ -1,15 +1,19 @@
 import os
 import json
-import time
+import asyncio
 import logging
-import shutil
 from typing import Dict, List, Any
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 from PIL import Image
 
+# AI retry configuration
+AI_MAX_RETRIES = 5
+AI_BASE_DELAY = 2.0  # seconds, doubles each retry (exponential backoff)
+
 class AIProcessor:
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize AIProcessor with Gemini API models."""
         self.logger = logging.getLogger(__name__)
         self.api_key = os.getenv('GEMINI_API_KEY')
         
@@ -22,44 +26,47 @@ class AIProcessor:
         
         self.logger.info("AI Processor initialized with Gemini API")
     
-    def _generate_with_retry(self, model, *args, **kwargs):
-        """Обертка для вызова API с retry при Rate Limits (429)."""
-        max_retries = 5
-        base_delay = 2.0
+    async def _generate_with_retry(self, model: Any, *args: Any, **kwargs: Any) -> Any:
+        """Wrapper for API calls with retry on Rate Limits (429).
+
+        Uses asyncio.sleep() instead of time.sleep() to avoid blocking
+        the event loop during retry waits.
+        """
+        max_retries = AI_MAX_RETRIES
+        base_delay = AI_BASE_DELAY
+        loop = asyncio.get_event_loop()
         for attempt in range(max_retries):
             try:
-                return model.generate_content(*args, **kwargs)
+                return await loop.run_in_executor(
+                    None, lambda: model.generate_content(*args, **kwargs)
+                )
             except ResourceExhausted as e:
                 if attempt == max_retries - 1:
                     self.logger.error(f"Rate limit exceeded after {max_retries} retries: {e}")
                     raise
                 delay = base_delay * (2 ** attempt)
                 self.logger.warning(f"Rate limit hit. Retrying in {delay}s (Attempt {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-    def extract_equipment_lists(self, log_file_path: str) -> Dict[str, List[str]]:
-        """
-        Извлекает списки оборудования для монтажа и демонтажа из лога сообщений.
-        
+                await asyncio.sleep(delay)
+    async def extract_equipment_lists(self, log_file_path: str) -> Dict[str, List[str]]:
+        """Extract equipment lists for installation/removal from a message log.
+
         Args:
-            log_file_path: Путь к файлу messages_log.txt
-            
+            log_file_path: Path to messages_log.txt file.
+
         Returns:
-            Dict с ключами 'demontaj' и 'montaj', содержащий списки оборудования
+            Dict with 'demontaj' and 'montaj' keys containing equipment lists.
         """
         try:
-            # Читаем лог файл
             with open(log_file_path, 'r', encoding='utf-8') as f:
                 log_content = f.read()
-            
-            # Промпт для извлечения списков оборудования
             prompt = """Ты — технический ассистент. Проанализируй предоставленный лог сообщений из Telegram-чата инженеров. 
             Найди сообщение, в котором перечисляется оборудование для монтажа (Montaj) и демонтажа (Demontaj). 
             Извлеки эти данные и верни СТРОГО в формате JSON. 
             Пример ответа: {"demontaj": ["Anten T1003M6R011", "DCDU12B"], "montaj": ["RRU 5516"]}. 
             Если списков нет, верни пустые массивы."""
             
-            # Отправляем запрос к Gemini с retry
-            response = self._generate_with_retry(
+            # Send request to Gemini with retry
+            response = await self._generate_with_retry(
                 self.text_model,
                 prompt + "\n\nЛог сообщений:\n" + log_content,
                 generation_config=genai.types.GenerationConfig(
@@ -68,10 +75,10 @@ class AIProcessor:
                 )
             )
             
-            # Парсим JSON ответ
+            # Parse JSON response
             result = json.loads(response.text)
-            
-            # Валидация структуры
+
+            # Validate structure
             if not isinstance(result, dict):
                 raise ValueError("Invalid response format")
             
@@ -80,39 +87,37 @@ class AIProcessor:
             if 'montaj' not in result:
                 result['montaj'] = []
             
-            # Убедимся, что это списки строк
+            # Ensure values are lists of strings
             result['demontaj'] = [str(item).strip() for item in result['demontaj'] if item]
             result['montaj'] = [str(item).strip() for item in result['montaj'] if item]
             
-            self.logger.info(f"Извлечено списков: демонтаж - {len(result['demontaj'])}, монтаж - {len(result['montaj'])}")
+            self.logger.info(f"Extracted lists: demontaj={len(result['demontaj'])}, montaj={len(result['montaj'])}")
             return result
             
         except FileNotFoundError:
-            self.logger.error(f"Лог файл не найден: {log_file_path}")
+            self.logger.error(f"Log file not found: {log_file_path}")
             return {"demontaj": [], "montaj": []}
         except json.JSONDecodeError as e:
-            self.logger.error(f"Ошибка парсинга JSON ответа: {e}")
+            self.logger.error(f"JSON parse error: {e}")
             return {"demontaj": [], "montaj": []}
         except Exception as e:
-            self.logger.error(f"Ошибка при извлечении списков оборудования: {e}")
+            self.logger.error(f"Error extracting equipment lists: {e}")
             return {"demontaj": [], "montaj": []}
     
-    def analyze_photo(self, photo_path: str, demontaj_list: List[str], montaj_list: List[str]) -> Dict[str, Any]:
-        """
-        Анализирует фотографию для определения демонтированного оборудования.
-        
+    async def analyze_photo(self, photo_path: str, demontaj_list: List[str], montaj_list: List[str]) -> Dict[str, Any]:
+        """Analyze a photo to determine if it shows decommissioned equipment.
+
         Args:
-            photo_path: Путь к файлу фотографии
-            demontaj_list: Список оборудования для демонтажа
-            montaj_list: Список оборудования для монтажа
-            
+            photo_path: Path to the photo file.
+            demontaj_list: List of equipment scheduled for removal.
+            montaj_list: List of equipment scheduled for installation.
+
         Returns:
-            Dict с результатами анализа: is_demontaj, equipment_found, reason
+            Dict with analysis results: is_demontaj, equipment_found, reason.
         """
         try:
-            # Проверяем существование файла
             if not os.path.exists(photo_path):
-                raise FileNotFoundError(f"Фото файл не найден: {photo_path}")
+                raise FileNotFoundError(f"Photo file not found: {photo_path}")
             
             demontaj_str = ", ".join(demontaj_list) if demontaj_list else "Нет списка"
             montaj_str = ", ".join(montaj_list) if montaj_list else "Нет списка"
@@ -133,49 +138,48 @@ class AIProcessor:
             
             Ответь строго в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Название из списка демонтажа или null", "reason": "Детально объясни по визуальным признакам, почему это старое/новое"}}."""
             
-            # Загружаем изображение через контекстный менеджер для гарантии освобождения файла
+            # Open image via context manager to ensure file handle is released
             with Image.open(photo_path) as image:
                 try:
-                    # Отправляем запрос к Gemini Vision API с retry
-                    response = self._generate_with_retry(
+                    # Send request to Gemini Vision API with retry
+                    response = await self._generate_with_retry(
                         self.vision_model,
-                        [prompt, image],    
+                        [prompt, image],
                         generation_config=genai.types.GenerationConfig(
                             response_mime_type="application/json",
-                            temperature=0.1, # Понизили температуру для большей строгости
+                            temperature=0.1,  # Low temperature for stricter classification
                         )
                     )
                     
-                    # Парсим JSON ответ
+                    # Parse JSON response
                     result = json.loads(response.text)
-                    
-                    # Валидация и нормализация
+
+                    # Validate and normalize
                     if not isinstance(result, dict):
                         raise ValueError("Invalid response format")
                     
-                    # Убедимся, что все поля присутствуют
+                    # Ensure all required fields are present
                     result.setdefault('is_demontaj', False)
                     result.setdefault('equipment_found', None)
                     result.setdefault('reason', 'Не удалось определить')
                     
-                    # Логируем результат
-                    equipment_name = result['equipment_found'] or 'не определено'
-                    self.logger.info(f"Анализ фото {os.path.basename(photo_path)}: демонтаж={result['is_demontaj']}, оборудование={equipment_name}. Причина: {result.get('reason')}")
+                    equipment_name = result['equipment_found'] or 'unknown'
+                    self.logger.info(f"Photo analysis {os.path.basename(photo_path)}: demontaj={result['is_demontaj']}, equipment={equipment_name}. Reason: {result.get('reason')}")
                     
                     return result
                     
                 except Exception as e:
-                    self.logger.error(f"Ошибка при анализе содержимого изображения {photo_path}: {e}")
+                    self.logger.error(f"Error analyzing image content {photo_path}: {e}")
                     raise
             
         except FileNotFoundError as e:
             self.logger.error(str(e))
             return {"is_demontaj": False, "equipment_found": None, "reason": "Файл не найден"}
         except json.JSONDecodeError as e:
-            self.logger.error(f"Ошибка парсинга JSON ответа: {e}")
+            self.logger.error(f"JSON parse error for photo response: {e}")
             return {"is_demontaj": False, "equipment_found": None, "reason": "Ошибка анализа"}
         except Exception as e:
-            self.logger.error(f"Ошибка при анализе фотографии {photo_path}: {e}")
+            self.logger.error(f"Error analyzing photo {photo_path}: {e}")
             return {"is_demontaj": False, "equipment_found": None, "reason": "Техническая ошибка"}
     
 
