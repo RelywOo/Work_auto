@@ -575,8 +575,8 @@ class TelegramClientManager:
                             'me',
                             f"🚨 Healthcheck не работает уже {consecutive_failures} раз подряд! Проверьте бота."
                         )
-                    except Exception:
-                        pass
+                    except Exception as alert_err:
+                        self.logger.debug(f"Failed to send healthcheck alert: {alert_err}")
                     consecutive_failures = 0
                 await asyncio.sleep(60)
 
