@@ -127,6 +127,10 @@ def test_concurrent_db_writes(tmp_path):
     num_threads = 10
     writes_per_thread = 20
 
+    # Create parent topics first (FK constraint)
+    for tid in range(num_threads):
+        db.update_topic(tid, f"Topic {tid}", 0)
+
     def write_messages(thread_id):
         try:
             for i in range(writes_per_thread):
@@ -160,6 +164,9 @@ def test_concurrent_read_write(tmp_path):
     db_path = tmp_path / "test_rw.db"
     db = DatabaseManager(str(db_path))
     errors = []
+
+    # Create parent topic first (FK constraint)
+    db.update_topic(1, "Topic 1", 0)
 
     # Предзаполняем данные
     for i in range(50):
@@ -219,6 +226,7 @@ def test_db_on_readonly_path_after_init(tmp_path):
     os.makedirs(db_path.parent, exist_ok=True)
 
     db = DatabaseManager(str(db_path))
+    db.update_topic(100, "Topic 100", 0)
     db.save_message(1, 100, 'text')
     assert db.is_message_processed(1) is True
 
@@ -229,6 +237,7 @@ def test_db_rejects_duplicate_message(tmp_path):
     db_path = tmp_path / "dup.db"
     db = DatabaseManager(str(db_path))
 
+    db.update_topic(100, "Topic 100", 0)
     db.save_message(42, 100, 'text')
     assert db.is_message_processed(42) is True
 

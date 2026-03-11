@@ -59,7 +59,7 @@ class TelegramClientManager:
         self.wait_time = int(os.getenv('WAIT_TIME', str(DEFAULT_WAIT_TIME)))
         max_workers = int(os.getenv('MAX_WORKERS', str(DEFAULT_MAX_WORKERS)))
         self.task_queue = TaskQueue(max_workers=max_workers, telegram_client=self)
-        self.db = DatabaseManager()
+        self.db = DatabaseManager(os.getenv('DB_PATH', 'bot_memory.db'))
         self._topic_cache: OrderedDict = OrderedDict()  # topic_id -> (title, expiry_time)
 
     async def connect(self) -> None:
@@ -186,6 +186,15 @@ class TelegramClientManager:
         try:
             topic_dir = self._create_topic_folder(topic_id)
             last_msg_id = self.db.get_last_msg_id(topic_id)
+            
+            # Fetch topic title early to ensure the topic exists in the DB before messages are saved
+            topic_title = await self.get_topic_title_by_id(topic_id)
+            title = topic_title or f"Topic {topic_id}"
+            
+            # If it's a new topic, create the record now to satisfy FK constraints in processed_messages
+            if last_msg_id is None:
+                self.db.update_topic(topic_id, title, 0)
+                self.logger.info(f"🆕 New topic {topic_id} ('{title}') initialized in DB")
 
             chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
             photos_count = 0
@@ -269,12 +278,14 @@ class TelegramClientManager:
                 await asyncio.sleep(0.2)
 
             if max_message_id > 0:
-                topic_title = await self.get_topic_title_by_id(topic_id)
-                title = topic_title or f"Topic {topic_id}"
                 self.db.update_topic(topic_id, title, max_message_id)
                 self.logger.info(f"DB updated: topic_id={topic_id}, last_msg_id={max_message_id}")
 
             self.logger.info(f"Topic download complete. Downloaded {photos_count} photos and {text_count} text messages.")
+
+            # DEBUG: check DB visibility from the same thread that wrote the data
+            debug_count = len(self.db.get_unprocessed_files(topic_id))
+            self.logger.info(f"DEBUG [same thread]: unprocessed files in DB right after download = {debug_count}")
 
             return {
                 'text_messages': text_count,
@@ -283,7 +294,7 @@ class TelegramClientManager:
 
         except Exception as e:
             self.logger.error(f"Error downloading topic {topic_id}: {e}")
-            return {'text_messages': 0, 'photos': 0}
+            raise
 
     @with_retry(max_retries=3)
     async def get_topic_title_by_id(self, topic_id: int) -> Optional[str]:
@@ -357,6 +368,78 @@ class TelegramClientManager:
         except Exception as e:
             self.logger.error(f"Error searching main topic for VDO (site_id={site_id}): {e}")
             return None
+
+    @with_retry(max_retries=3)
+    async def find_vdo_topic_for_main(self, site_id: str) -> Optional[int]:
+        """Find the VDO topic (with VDO/ВДО) for the given site_id."""
+        if not site_id:
+            return None
+
+        try:
+            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            result = await self.client(GetForumTopicsRequest(
+                peer=chat,
+                q=site_id,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            ))
+
+            if not getattr(result, 'topics', []):
+                return None
+
+            for topic in result.topics:
+                title_upper = topic.title.upper()
+                if site_id.upper() in title_upper and ('VDO' in title_upper or 'ВДО' in title_upper) and 'TSS' not in title_upper and 'TSSR' not in title_upper:
+                    self.logger.info(f"✅ Found VDO twin for main topic (site {site_id}): {topic.title} (ID: {topic.id})")
+                    return topic.id
+
+            return None
+        except Exception as e:
+            self.logger.error(f"Error searching VDO twin for main topic (site_id={site_id}): {e}")
+            return None
+
+    @with_retry(max_retries=3)
+    async def download_topic_photos_to_dir(self, topic_id: int, target_dir: str, photo_message_limit: int = 100) -> int:
+        """Download all photos from a topic directly to a specified directory.
+
+        Args:
+            topic_id: ID of the topic to download photos from.
+            target_dir: Directory to save photos to.
+            photo_message_limit: Maximum number of messages to scan.
+
+        Returns:
+            Number of photos downloaded.
+        """
+        os.makedirs(target_dir, exist_ok=True)
+        chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+        photos_count = 0
+        messages_iterated = 0
+
+        async for message in self.client.iter_messages(entity=chat, reply_to=topic_id):
+            messages_iterated += 1
+            if messages_iterated > photo_message_limit:
+                break
+
+            if message.media and isinstance(message.media, MessageMediaPhoto):
+                file_name = f"main_photo_{message.id}.jpg"
+                file_path = os.path.join(target_dir, file_name)
+
+                try:
+                    downloaded_path = await self.client.download_media(message, file=file_path)
+                    if downloaded_path:
+                        photos_count += 1
+                        self.logger.info(f"📸 Main topic photo downloaded: {file_name}")
+                    await asyncio.sleep(0.5)
+                except FloodWaitError as e:
+                    self.logger.warning(f"FloodWait downloading main topic photo: {e.seconds}s")
+                    await asyncio.sleep(e.seconds)
+
+            await asyncio.sleep(0.2)
+
+        self.logger.info(f"📸 Downloaded {photos_count} photos from main topic {topic_id}")
+        return photos_count
 
     @with_retry(max_retries=3)
     async def get_topic_text_log(self, topic_id: int) -> str:
@@ -469,7 +552,7 @@ class TelegramClientManager:
                 self.logger.info("✅ No topics with unprocessed AI files found")
 
             # Download recovery: check recent active topics
-            recent_topics = await self.get_chat_topics(limit=1)
+            recent_topics = await self.get_chat_topics(limit=5)
             if recent_topics:
                 recent_topic_ids = [topic['topic_id'] for topic in recent_topics]
                 recovery_topics.update(recent_topic_ids)

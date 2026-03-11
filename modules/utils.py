@@ -67,7 +67,7 @@ def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]], te
     return readme_path
 
 def create_zip_report(site_id: str, source_folder: str, output_folder: str, topic_title: str) -> str:
-    """Create a ZIP archive with Demontaj photos and README.txt."""
+    """Create a ZIP archive with Demontaj/Montaj photos and README.txt."""
     os.makedirs(output_folder, exist_ok=True)
 
     # Add suffix based on topic type
@@ -85,6 +85,11 @@ def create_zip_report(site_id: str, source_folder: str, output_folder: str, topi
         demontaj_folder = os.path.join(source_folder, "Demontaj")
         if os.path.exists(demontaj_folder):
             shutil.copytree(demontaj_folder, os.path.join(temp_folder, "Demontaj"))
+
+        # Copy Montaj folder if it exists
+        montaj_folder = os.path.join(source_folder, "Montaj")
+        if os.path.exists(montaj_folder):
+            shutil.copytree(montaj_folder, os.path.join(temp_folder, "Montaj"))
 
         # Copy README.txt if it exists
         readme_path = os.path.join(source_folder, "README.txt")

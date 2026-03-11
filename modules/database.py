@@ -20,13 +20,15 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path, timeout=20.0) as conn:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys = ON")
             except Exception as e:
-                self.logger.warning(f"Failed to enable WAL mode: {e}")
+                self.logger.warning(f"Failed to set PRAGMAs: {e}")
             yield conn
     
     def init_db(self) -> None:
         """Create DB file and tables (processed_topics, processed_messages) if they don't exist."""
         with self._get_connection() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS processed_topics (
@@ -42,7 +44,8 @@ class DatabaseManager:
                     topic_id INTEGER,
                     message_type TEXT NOT NULL, -- 'text' or 'photo'
                     file_path TEXT, -- Nullable for text messages
-                    downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (topic_id) REFERENCES processed_topics(topic_id) ON DELETE CASCADE
                 )
             ''')
             
@@ -93,9 +96,12 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO processed_topics 
-                (topic_id, title, last_msg_id, updated_at) 
+                INSERT INTO processed_topics (topic_id, title, last_msg_id, updated_at)
                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(topic_id) DO UPDATE SET
+                    title = excluded.title,
+                    last_msg_id = excluded.last_msg_id,
+                    updated_at = CURRENT_TIMESTAMP
             ''', (topic_id, title, last_msg_id))
             conn.commit()
     

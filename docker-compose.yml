@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   bot:
     build: .
@@ -9,14 +7,20 @@ services:
       - .env
     environment:
       - TZ=Europe/Kiev
+      - DB_PATH=/app/data/bot_memory.db
+      - SESSION_FILE=/app/data/session_name.session
     volumes:
-      # Прокидываем базу данных и сессию, чтобы не терять при перезапуске
-      - ./bot_memory.db:/app/bot_memory.db
-      - ./session_name.session:/app/session_name.session
+      # Прокидываем директорию данных (для сохранения DB, -wal, -shm файлов и сессии)
+      - ./data:/app/data
       # Прокидываем каталоги с файлами и логами
       - ./downloads:/app/downloads
       - ./output:/app/output
       - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Настройки ресурсов (опционально)
     deploy:
       resources:

@@ -7,6 +7,7 @@ import pytest
 import asyncio
 import json
 import os
+import shutil
 import zipfile
 from unittest.mock import MagicMock, AsyncMock, patch
 from PIL import Image
@@ -66,7 +67,14 @@ def integration_env(tmp_path):
         'photos': 3, 'text_messages': 5
     })
     mock_tg.send_message_with_retry = AsyncMock()
-    mock_tg.send_file_with_retry = AsyncMock()
+
+    async def _backup_zip_on_send(*args, **kwargs):
+        """Save a backup copy of ZIP before pipeline deletes it."""
+        file_path = kwargs.get('file') or (args[1] if len(args) > 1 else None)
+        if file_path and os.path.exists(file_path):
+            shutil.copy2(file_path, str(tmp_path / "backup.zip"))
+
+    mock_tg.send_file_with_retry = AsyncMock(side_effect=_backup_zip_on_send)
     mock_tg.processed_msg_ids = set()
 
     # main_loop будет установлен внутри теста
@@ -138,9 +146,10 @@ async def test_full_pipeline_happy_path(integration_env):
     zip_path = send_call_args.kwargs.get('file') or send_call_args[1].get('file')
     assert zip_path.endswith('.zip')
 
-    # ZIP существует и содержит README
-    assert os.path.exists(zip_path)
-    with zipfile.ZipFile(zip_path, 'r') as zf:
+    # ZIP содержал README (проверяем через копию, сохранённую до cleanup)
+    backup_zip = env['tmp_path'] / "backup.zip"
+    assert backup_zip.exists(), "Backup ZIP should have been saved by send side_effect"
+    with zipfile.ZipFile(str(backup_zip), 'r') as zf:
         names = zf.namelist()
         assert "README.txt" in names
 
@@ -246,3 +255,93 @@ async def test_worker_processes_queued_task(integration_env):
     tq._process_topic_heavy.assert_called_once()
     call_args = tq._process_topic_heavy.call_args[0][0]
     assert call_args['topic_id'] == 100
+
+
+# ===========================================================================
+# Тест: graceful shutdown ждёт завершения текущей задачи
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown_waits_for_worker(integration_env):
+    """shutdown() дожидается завершения текущей задачи воркера без cancel."""
+    env = integration_env
+    tq = env['task_queue']
+    tq.main_loop = asyncio.get_running_loop()
+
+    processing_started = asyncio.Event()
+    processing_finished = asyncio.Event()
+
+    original_process = tq._process_topic_heavy
+
+    def slow_process(task_data):
+        # Signal that processing has started
+        tq.main_loop.call_soon_threadsafe(processing_started.set)
+        import time
+        time.sleep(0.5)  # Simulate work
+        tq.main_loop.call_soon_threadsafe(processing_finished.set)
+
+    tq._process_topic_heavy = MagicMock(side_effect=slow_process)
+    env['mock_tg'].db.get_last_msg_id.return_value = None
+    env['mock_tg'].db.get_unprocessed_files.return_value = [(10, '/fake/photo.jpg')]
+
+    await tq.add_topic_task(100, "UA123 Test")
+
+    # Start worker
+    worker_task = asyncio.create_task(tq._worker("TestWorker"))
+    tq.active_tasks.add(worker_task)
+    worker_task.add_done_callback(tq.active_tasks.discard)
+
+    # Wait for processing to start
+    await processing_started.wait()
+
+    # Call shutdown — should wait for worker to finish, not cancel immediately
+    await tq.shutdown()
+
+    # Worker should have finished its task gracefully
+    assert processing_finished.is_set(), "Worker task should have completed before shutdown returned"
+    tq._process_topic_heavy.assert_called_once()
+
+
+# ===========================================================================
+# Тест: shutdown принудительно cancel()-ит воркеров после таймаута
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_shutdown_force_cancels_after_timeout(integration_env):
+    """shutdown() принудительно cancel()-ит воркеров, застрявших дольше таймаута."""
+    import modules.task_queue as tq_module
+
+    env = integration_env
+    tq = env['task_queue']
+    tq.main_loop = asyncio.get_running_loop()
+
+    stuck_started = asyncio.Event()
+
+    def stuck_process(task_data):
+        # Signal that processing has started, then block "forever"
+        tq.main_loop.call_soon_threadsafe(stuck_started.set)
+        import time
+        time.sleep(30)  # Simulate a stuck task (much longer than timeout)
+
+    tq._process_topic_heavy = MagicMock(side_effect=stuck_process)
+    env['mock_tg'].db.get_last_msg_id.return_value = None
+    env['mock_tg'].db.get_unprocessed_files.return_value = [(10, '/fake/photo.jpg')]
+
+    await tq.add_topic_task(100, "UA123 Test")
+
+    worker_task = asyncio.create_task(tq._worker("TestWorker"))
+    tq.active_tasks.add(worker_task)
+    worker_task.add_done_callback(tq.active_tasks.discard)
+
+    await stuck_started.wait()
+
+    # Use a very short timeout so the test doesn't block
+    original_timeout = tq_module.GRACEFUL_SHUTDOWN_TIMEOUT
+    tq_module.GRACEFUL_SHUTDOWN_TIMEOUT = 1  # 1 second timeout
+    try:
+        await tq.shutdown()
+    finally:
+        tq_module.GRACEFUL_SHUTDOWN_TIMEOUT = original_timeout
+
+    # Worker should have been force-cancelled
+    assert worker_task.done(), "Worker task should be done after shutdown (force-cancelled)"

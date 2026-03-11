@@ -10,6 +10,7 @@ from PIL import Image
 # AI retry configuration
 AI_MAX_RETRIES = 5
 AI_BASE_DELAY = 2.0  # seconds, doubles each retry (exponential backoff)
+AI_TIMEOUT = 120.0   # seconds, max wait for a single API call
 
 class AIProcessor:
     def __init__(self) -> None:
@@ -21,31 +22,44 @@ class AIProcessor:
             raise ValueError("GEMINI_API_KEY not found in environment variables")
         
         genai.configure(api_key=self.api_key)
-        self.text_model = genai.GenerativeModel('gemini-flash-latest')
-        self.vision_model = genai.GenerativeModel('gemini-flash-latest')
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-flash-latest')
+        self.text_model = genai.GenerativeModel(model_name)
+        self.vision_model = genai.GenerativeModel(model_name)
         
         self.logger.info("AI Processor initialized with Gemini API")
     
     async def _generate_with_retry(self, model: Any, *args: Any, **kwargs: Any) -> Any:
-        """Wrapper for API calls with retry on Rate Limits (429).
+        """Wrapper for API calls with retry on Rate Limits (429) and timeouts.
 
         Uses asyncio.sleep() instead of time.sleep() to avoid blocking
         the event loop during retry waits.
         """
         max_retries = AI_MAX_RETRIES
         base_delay = AI_BASE_DELAY
-        loop = asyncio.get_event_loop()
+        # Fix PRR [P0-4]: Deprecated asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for attempt in range(max_retries):
             try:
-                return await loop.run_in_executor(
+                # Fix PRR [P0-3]: No timeout on AI calls
+                task = loop.run_in_executor(
                     None, lambda: model.generate_content(*args, **kwargs)
                 )
+                return await asyncio.wait_for(task, timeout=AI_TIMEOUT)
             except ResourceExhausted as e:
+                # Handle rate limiting (HTTP 429) from Google API
                 if attempt == max_retries - 1:
                     self.logger.error(f"Rate limit exceeded after {max_retries} retries: {e}")
                     raise
                 delay = base_delay * (2 ** attempt)
                 self.logger.warning(f"Rate limit hit. Retrying in {delay}s (Attempt {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(delay)
+            except asyncio.TimeoutError:
+                # Handle infinite hanging requests
+                if attempt == max_retries - 1:
+                    self.logger.error(f"AI timeout ({AI_TIMEOUT}s) exceeded after {max_retries} retries")
+                    raise
+                delay = base_delay * (2 ** attempt)
+                self.logger.warning(f"AI call timed out after {AI_TIMEOUT}s. Retrying in {delay}s (Attempt {attempt + 1}/{max_retries})...")
                 await asyncio.sleep(delay)
     async def extract_equipment_lists(self, log_file_path: str) -> Dict[str, List[str]]:
         """Extract equipment lists for installation/removal from a message log.

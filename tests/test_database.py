@@ -49,6 +49,9 @@ def test_save_and_check_messages(db_manager):
     assert db_manager.is_message_processed(10) is False
     assert db_manager.get_processed_message_ids(100) == set()
 
+    # Create parent topic first (FK constraint)
+    db_manager.update_topic(100, "Test Topic", 0)
+
     # Save a text message
     db_manager.save_message(10, 100, 'text')
     
@@ -80,6 +83,10 @@ def test_save_and_check_messages(db_manager):
 def test_get_topics_with_unprocessed_files(db_manager):
     """Тест получения топиков с необработанными файлами."""
     assert db_manager.get_topics_with_unprocessed_files() == []
+
+    # Create parent topics first (FK constraint)
+    db_manager.update_topic(200, "Topic 200", 0)
+    db_manager.update_topic(300, "Topic 300", 0)
 
     # Add processed text and a photo for topic 200
     db_manager.save_message(1, 200, 'text')
