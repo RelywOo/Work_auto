@@ -26,9 +26,8 @@ def test_create_readme_file(tmp_path):
         'demontaj': ['Switch 1', 'Router 2'],
         'montaj': ['Switch 3']
     }
-    text_messages = ["Worker message 1\n", "Worker message 2"]
     
-    readme_path = create_readme_file(str(topic_dir), equipment_lists, text_messages)
+    readme_path = create_readme_file(str(topic_dir), equipment_lists)
     
     assert os.path.exists(readme_path)
     with open(readme_path, 'r', encoding='utf-8') as f:
@@ -38,7 +37,7 @@ def test_create_readme_file(tmp_path):
     assert "- Switch 1" in content
     assert "ОБОРУДОВАНИЕ НА МОНТАЖ:" in content
     assert "- Switch 3" in content
-    assert "Worker message 1" in content
+    assert "ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ:" not in content
 
 def test_create_zip_report(tmp_path):
     source_folder = tmp_path / "source"

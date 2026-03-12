@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 from PIL import Image
@@ -142,10 +142,24 @@ class AIProcessor:
             Список ДЕМОНТАЖА (ищем это): [{demontaj_str}]
             Список МОНТАЖА (это новое оборудование, игнорируй его): [{montaj_str}]
             
-            ПРАВИЛА КЛАССИФИКАЦИИ (КРИТИЧНО ВАЖНО):
-            
-            1. ВИЗУАЛЬНЫЕ ПРИЗНАКИ ИМЕЮТ НАИВЫСШИЙ ПРИОРИТЕТ.
-               Если оборудование имеет ЯВНЫЕ визуальные признаки старого/демонтированного — классифицируй как ДЕМОНТАЖ (is_demontaj: true), ДАЖЕ ЕСЛИ точная модель не найдена в списке демонтажа.
+            ПРАВИЛА КЛАССИФИКАЦИИ (КРИТИЧНО ВАЖНО — применяй СТРОГО В УКАЗАННОМ ПОРЯДКЕ):
+
+            1. СОВПАДЕНИЕ С КОНКРЕТНЫМ СПИСКОМ — НАИВЫСШИЙ ПРИОРИТЕТ.
+               Если модель оборудования на шильдике найдена в списке ДЕМОНТАЖА (с учётом нечёткого сопоставления) — это ДЕМОНТАЖ (is_demontaj: true), НЕЗАВИСИМО от внешнего вида оборудования. Демонтируемое оборудование может выглядеть чистым и новым — это нормально.
+               Аналогично: если модель найдена ТОЛЬКО в списке МОНТАЖА — это МОНТАЖ (is_demontaj: false).
+
+            2. ПЕРЕСЕЧЕНИЯ: Если оборудование (или его тип, например DCDU, Кабель) есть В ОБОИХ списках — определяй по ВНЕШНЕМУ ВИДУ (см. правило 4).
+
+            3. НЕЧЁТКОЕ СОПОСТАВЛЕНИЕ МОДЕЛЕЙ (Fuzzy Matching).
+               Модели на шильдике могут ОТЛИЧАТЬСЯ от списка на пару символов, суффиксов или ревизий. Это НОРМАЛЬНО.
+               Примеры эквивалентных моделей:
+               - ATR4518R6V01 ≈ ATR451602v01 (одна серия ATR4518/ATR4516)
+               - RRU5526et ≈ RRU 5526 (суффикс 'et' — вариант исполнения)
+               - TDT-172718DEH-65Fv03 ≈ TDT-172718DEI-65Fv03 (одна буква отличается)
+               ПРАВИЛО: Сравнивай по ОСНОВЕ модели (первые значимые символы серии), а не посимвольно. Если основа совпадает — считай оборудование найденным в списке.
+
+            4. ВИЗУАЛЬНЫЕ ПРИЗНАКИ (используй когда модель НЕ найдена ни в одном списке, ИЛИ найдена в обоих).
+               Если модель не удалось прочитать или она не найдена ни в одном списке, определяй по внешнему виду:
                Признаки ДЕМОНТАЖА (старое оборудование):
                - Грязное, ржавое, в пыли, потёртое, с царапинами
                - Лежит на земле/асфальте/бетоне без упаковки
@@ -159,22 +173,12 @@ class AIProcessor:
                - Жёлтые маркировочные бирки на кабелях, новые пластиковые стяжки
                - Смонтировано на мачте/в стойке, кабели подключены и промаркированы
                - Горящие LED-индикаторы (оборудование в работе)
-            
-            2. НЕЧЁТКОЕ СОПОСТАВЛЕНИЕ МОДЕЛЕЙ (Fuzzy Matching).
-               Модели на шильдике могут ОТЛИЧАТЬСЯ от списка на пару символов, суффиксов или ревизий. Это НОРМАЛЬНО.
-               Примеры эквивалентных моделей:
-               - ATR4518R6V01 ≈ ATR451602v01 (одна серия ATR4518/ATR4516)
-               - RRU5526et ≈ RRU 5526 (суффикс 'et' — вариант исполнения)
-               - TDT-172718DEH-65Fv03 ≈ TDT-172718DEI-65Fv03 (одна буква отличается)
-               ПРАВИЛО: Сравнивай по ОСНОВЕ модели (первые значимые символы серии), а не посимвольно. Если основа совпадает — считай оборудование найденным в списке.
-            
-            3. Пересечения: Если тип оборудования (например, DCDU или Кабель) есть В ОБОИХ списках, определяй по ВНЕШНЕМУ ВИДУ (см. правило 1).
-            
-            4. Если это просто панорама вышки без крупного плана конкретного оборудования — отвечай is_demontaj: false.
-            
-            5. Внимательно различай СЕРИИ моделей (например, RRU 3xxx — старая серия, RRU 5xxx — новая). Не перепутай старую модель с новой.
-            
-            6. В поле equipment_found записывай ТОЧНО то, что прочитано на шильдике. Не подгоняй текст под список.
+
+            5. Если это просто панорама вышки без крупного плана конкретного оборудования — отвечай is_demontaj: false.
+
+            6. Внимательно различай СЕРИИ моделей (например, RRU 3xxx — старая серия, RRU 5xxx — новая). Не перепутай старую модель с новой.
+
+            7. В поле equipment_found записывай ТОЧНО то, что прочитано на шильдике. Не подгоняй текст под список.
             
             Ответь строго в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Что прочитано на шильдике или визуально определено, либо null", "reason": "Детально объясни: какие визуальные признаки и/или совпадение модели привели к решению"}}."""
             
@@ -204,7 +208,9 @@ class AIProcessor:
                     result.setdefault('reason', 'Не удалось определить')
                     
                     equipment_name = result['equipment_found'] or 'unknown'
-                    self.logger.info(f"Photo analysis {os.path.basename(photo_path)}: demontaj={result['is_demontaj']}, equipment={equipment_name}. Reason: {result.get('reason')}")
+                    classification = 'DEMONTAJ' if result['is_demontaj'] else 'MONTAJ'
+                    self.logger.info(f"📷 {os.path.basename(photo_path)} → {classification} | equipment: {equipment_name}")
+                    self.logger.info(f"   └─ Reason: {result.get('reason')}")
                     
                     return result
                     
@@ -221,5 +227,163 @@ class AIProcessor:
         except Exception as e:
             self.logger.error(f"Error analyzing photo {photo_path}: {e}")
             return {"is_demontaj": False, "equipment_found": None, "reason": "Техническая ошибка"}
-    
 
+    async def reanalyze_with_context(
+        self,
+        photo_path: str,
+        demontaj_list: List[str],
+        montaj_list: List[str],
+        neighbor_classifications: List[str],
+    ) -> Dict[str, Any]:
+        """Re-analyze a photo with neighbor context for outlier correction.
+
+        Args:
+            photo_path: Path to the photo file.
+            demontaj_list: List of equipment scheduled for removal.
+            montaj_list: List of equipment scheduled for installation.
+            neighbor_classifications: List of neighbor results, e.g. ['demontaj', 'demontaj', '?', 'demontaj'].
+                                      '?' marks the current photo's position.
+        """
+        context_str = ", ".join(neighbor_classifications)
+        demontaj_str = ", ".join(demontaj_list) if demontaj_list else "Нет списка"
+        montaj_str = ", ".join(montaj_list) if montaj_list else "Нет списка"
+
+        prompt = f"""Ты — строгий технический аудитор телеком-оборудования.
+            Это ПОВТОРНЫЙ анализ фото, которое было помечено как подозрительное, потому что его классификация
+            противоречит серии соседних фото.
+
+            Список ДЕМОНТАЖА: [{demontaj_str}]
+            Список МОНТАЖА: [{montaj_str}]
+
+            КОНТЕКСТ СЕРИИ (НАИВЫСШИЙ ПРИОРИТЕТ):
+            Инженеры фотографируют оборудование сериями — сначала монтаж, потом демонтаж.
+            Соседние фото в серии классифицированы так: [{context_str}].
+            Знак '?' — это текущее фото.
+
+            ПРАВИЛО ПРИОРИТЕТА ВТОРОГО ПРОХОДА (КРИТИЧНО ВАЖНО):
+            По умолчанию ДОВЕРЯЙ КОНТЕКСТУ СЕРИИ. Если все соседи классифицированы одинаково,
+            то это фото скорее всего относится к тому же типу.
+
+            Ты можешь НЕ согласиться с контекстом ТОЛЬКО при выполнении ВСЕХ условий одновременно:
+            1. На фото есть НЕОПРОВЕРЖИМЫЕ визуальные признаки противоположного типа
+               (например, заводская упаковка/коробка среди серии демонтажа, или грязь/ржавчина/оборудование на земле среди серии монтажа)
+            2. Модель оборудования найдена ТОЛЬКО в противоположном списке и ОТСУТСТВУЕТ в списке,
+               совпадающем с контекстом серии
+
+            ВАЖНО: Если оборудование (или его тип, например DCDU) есть в ОБОИХ списках — ВСЕГДА соглашайся с контекстом серии.
+            Если есть хоть малейшие сомнения — СОГЛАШАЙСЯ С КОНТЕКСТОМ СЕРИИ.
+
+            Визуальные признаки (для справки):
+            Признаки ДЕМОНТАЖА: грязное, ржавое, потёртое, на земле без упаковки, обрезаны провода, наклейка CAUTION.
+            Признаки МОНТАЖА: в заводской упаковке, чистое, новые бирки/стяжки, смонтировано на мачте, горящие LED.
+
+            Нечёткое сопоставление моделей: сравнивай по ОСНОВЕ модели, не посимвольно (ATR4518 ≈ ATR4516, RRU5526et ≈ RRU 5526).
+
+            В поле equipment_found записывай ТОЧНО то, что прочитано на шильдике. Не подгоняй текст под список.
+
+            Ответь строго в формате JSON: {{"is_demontaj": true/false, "equipment_found": "Что прочитано на шильдике или визуально определено, либо null", "reason": "Детально объясни: почему согласился или не согласился с контекстом серии"}}."""
+
+        try:
+            if not os.path.exists(photo_path):
+                raise FileNotFoundError(f"Photo file not found: {photo_path}")
+
+            with Image.open(photo_path) as image:
+                response = await self._generate_with_retry(
+                    self.vision_model,
+                    [prompt, image],
+                    generation_config=genai.types.GenerationConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                    ),
+                )
+                result = json.loads(response.text)
+
+                if not isinstance(result, dict):
+                    raise ValueError("Invalid response format")
+
+                result.setdefault("is_demontaj", False)
+                result.setdefault("equipment_found", None)
+                result.setdefault("reason", "Не удалось определить")
+
+                equipment_name = result["equipment_found"] or "unknown"
+                classification = "DEMONTAJ" if result["is_demontaj"] else "MONTAJ"
+                self.logger.info(
+                    f"🔄 Re-analysis {os.path.basename(photo_path)} → {classification} "
+                    f"| equipment: {equipment_name} | context: [{context_str}]"
+                )
+                self.logger.info(f"   └─ Reason: {result.get('reason')}")
+                return result
+
+        except FileNotFoundError as e:
+            self.logger.error(str(e))
+            return {"is_demontaj": False, "equipment_found": None, "reason": "Файл не найден"}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON parse error for re-analysis response: {e}")
+            return {"is_demontaj": False, "equipment_found": None, "reason": "Ошибка анализа"}
+        except Exception as e:
+            self.logger.error(f"Error re-analyzing photo {photo_path}: {e}")
+            return {"is_demontaj": False, "equipment_found": None, "reason": "Техническая ошибка"}
+
+
+def find_outliers(classifications: List[str]) -> List[int]:
+    """Find suspicious outlier photos that break the series pattern.
+
+    Engineers photograph equipment in series: first montaj, then demontaj.
+    A photo that breaks the series pattern is likely a classification error.
+
+    Args:
+        classifications: List of 'demontaj'/'montaj' strings in chronological order.
+
+    Returns:
+        List of indices of suspicious photos to re-analyze.
+    """
+    if len(classifications) < 3:
+        return []
+
+    # Build segments: [(value, start_index, length), ...]
+    segments: List[Tuple[str, int, int]] = []
+    current = classifications[0]
+    start = 0
+    for i in range(1, len(classifications)):
+        if classifications[i] != current:
+            segments.append((current, start, i - start))
+            current = classifications[i]
+            start = i
+    segments.append((current, start, len(classifications) - start))
+
+    # Check for chaotic pattern using transition rate.
+    # A clean series with outliers has few transitions relative to photo count
+    # (e.g., 7 transitions in 96 photos = 0.07). A truly chaotic pattern like
+    # [M,D,M,D,M,D,M] has a high rate (6/7 = 0.86). Threshold 0.3 separates them.
+    num_transitions = len(segments) - 1
+    transition_rate = num_transitions / len(classifications)
+    if transition_rate > 0.3:
+        return []
+
+    # Find short segments (1-3) surrounded by opposite type with enough mass
+    outlier_indices: List[int] = []
+    for seg_idx, (value, start_idx, length) in enumerate(segments):
+        if length > 3:
+            continue
+
+        # Calculate surrounding opposite mass
+        left_mass = 0
+        for j in range(seg_idx - 1, -1, -1):
+            if segments[j][0] != value:
+                left_mass += segments[j][2]
+            else:
+                break
+
+        right_mass = 0
+        for j in range(seg_idx + 1, len(segments)):
+            if segments[j][0] != value:
+                right_mass += segments[j][2]
+            else:
+                break
+
+        total_surrounding = left_mass + right_mass
+        if total_surrounding >= 5:
+            for i in range(start_idx, start_idx + length):
+                outlier_indices.append(i)
+
+    return outlier_indices

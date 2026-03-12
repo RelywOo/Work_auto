@@ -142,8 +142,9 @@ class DatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT message_id, file_path FROM processed_messages 
+                SELECT message_id, file_path FROM processed_messages
                 WHERE topic_id = ? AND ai_processed = 0 AND file_path IS NOT NULL
+                ORDER BY message_id ASC
             ''', (topic_id,))
             return cursor.fetchall()
     

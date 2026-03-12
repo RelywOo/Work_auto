@@ -37,8 +37,8 @@ def safe_rmtree(path: str, retries: int = 5, delay: float = 1.0):
             else:
                 logger.error(f"❌ Failed to delete folder {path} after {retries} attempts: {e}")
 
-def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]], text_messages: List[str]) -> str:
-    """Create README.txt report with equipment lists and messages."""
+def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]]) -> str:
+    """Create README.txt report with equipment lists."""
     readme_path = os.path.join(topic_dir, 'README.txt')
 
     with open(readme_path, 'w', encoding='utf-8') as f:
@@ -57,12 +57,6 @@ def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]], te
             for item in equipment_lists['montaj']:
                 f.write(f"- {item}\n")
             f.write("\n")
-
-        if text_messages:
-            f.write("ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ:\n")
-            f.write("-" * 30 + "\n")
-            for msg in text_messages:
-                f.write(f"{msg}")
 
     return readme_path
 

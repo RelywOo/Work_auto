@@ -251,3 +251,81 @@ async def test_analyze_photo_api_error(ai_processor, sample_photo):
 
     assert result['is_demontaj'] is False
     assert result['reason'] == "Техническая ошибка"
+
+
+# ===========================================================================
+# find_outliers
+# ===========================================================================
+
+from modules.ai_processor import find_outliers
+
+
+def test_find_outliers_single_outlier_in_demontaj():
+    """Одиночный montaj среди demontaj — выброс."""
+    classifications = ['demontaj'] * 3 + ['montaj'] + ['demontaj'] * 3
+    assert find_outliers(classifications) == [3]
+
+
+def test_find_outliers_single_outlier_in_montaj():
+    """Одиночный demontaj среди montaj — выброс."""
+    classifications = ['montaj'] * 3 + ['demontaj'] + ['montaj'] * 3
+    assert find_outliers(classifications) == [3]
+
+
+def test_find_outliers_small_group_outlier():
+    """Группа 3 demontaj среди montaj (>=5 окружающих) — выброс."""
+    classifications = ['montaj'] * 4 + ['demontaj'] * 3 + ['montaj'] * 4
+    assert find_outliers(classifications) == [4, 5, 6]
+
+
+def test_find_outliers_group_of_4_not_outlier():
+    """Группа 4+ не считается выбросом."""
+    classifications = ['montaj'] * 3 + ['demontaj'] * 4 + ['montaj'] * 3
+    assert find_outliers(classifications) == []
+
+
+def test_find_outliers_chaotic_pattern():
+    """Хаотичный паттерн (>4 переходов) — не пытаемся исправлять."""
+    classifications = ['montaj', 'demontaj', 'montaj', 'demontaj', 'montaj', 'demontaj', 'montaj']
+    assert find_outliers(classifications) == []
+
+
+def test_find_outliers_normal_transition():
+    """Нормальный переход M→D — ничего не трогаем."""
+    classifications = ['montaj'] * 5 + ['demontaj'] * 5
+    assert find_outliers(classifications) == []
+
+
+def test_find_outliers_too_few_photos():
+    """Менее 3 фото — нечего анализировать."""
+    assert find_outliers(['montaj', 'demontaj']) == []
+    assert find_outliers(['montaj']) == []
+    assert find_outliers([]) == []
+
+
+def test_find_outliers_all_same():
+    """Все фото одного типа — выбросов нет."""
+    assert find_outliers(['demontaj'] * 10) == []
+    assert find_outliers(['montaj'] * 10) == []
+
+
+def test_find_outliers_two_photo_group_outlier():
+    """Группа из 2 фото среди 5+ противоположных — выброс."""
+    classifications = ['demontaj'] * 4 + ['montaj'] * 2 + ['demontaj'] * 4
+    assert find_outliers(classifications) == [4, 5]
+
+
+def test_find_outliers_multiple_single_outliers():
+    """Несколько одиночных выбросов в иначе чистом паттерне — все найдены."""
+    # Real-world pattern: mostly montaj, then mostly demontaj, with 3 single outliers
+    classifications = (
+        ['montaj'] * 20 + ['demontaj'] +          # outlier at 20
+        ['montaj'] * 15 + ['demontaj'] +           # outlier at 36
+        ['montaj'] * 5 +
+        ['demontaj'] * 15 + ['montaj'] +           # outlier at 57
+        ['demontaj'] * 20
+    )
+    outliers = find_outliers(classifications)
+    assert 20 in outliers
+    assert 36 in outliers
+    assert 57 in outliers

@@ -343,16 +343,21 @@ class TaskQueue:
                     except Exception as e:
                         self.logger.error(f"❌ Error downloading photos from VDO twin: {e}")
 
-                for message_id, file_path in unprocessed_files:
+                # === Stage A: Classify all photos (without moving files) ===
+                self.logger.info(f"{'='*60}")
+                self.logger.info(f"📸 STAGE 1: Classifying {len(unprocessed_files)} photos...")
+                self.logger.info(f"{'='*60}")
+                classification_results = []  # [(message_id, file_path, ai_result)]
+                total_files = len(unprocessed_files)
+
+                for file_num, (message_id, file_path) in enumerate(unprocessed_files, 1):
                     try:
                         if is_vdo:
                             ai_result = 'demontaj'
-                            target_dir = demontaj_dir
-                            self.logger.info(f"🚀 VDO topic: file {os.path.basename(file_path)} routed to demontaj")
+                            self.logger.info(f"[{file_num}/{total_files}] 🚀 {os.path.basename(file_path)} → VDO → DEMONTAJ")
                         elif has_vdo_twin:
                             ai_result = 'montaj'
-                            target_dir = montaj_dir
-                            self.logger.info(f"🔗 Main topic with VDO twin: file {os.path.basename(file_path)} routed to montaj")
+                            self.logger.info(f"[{file_num}/{total_files}] 🔗 {os.path.basename(file_path)} → VDO twin → MONTAJ")
                         else:
                             analysis_result = asyncio.run_coroutine_threadsafe(
                                 ai_processor.analyze_photo(
@@ -362,34 +367,82 @@ class TaskQueue:
                                 ),
                                 self.main_loop
                             ).result()
-                            if analysis_result['is_demontaj']:
-                                ai_result = 'demontaj'
-                                target_dir = demontaj_dir
-                            else:
-                                ai_result = 'montaj'
-                                target_dir = montaj_dir
+                            ai_result = 'demontaj' if analysis_result['is_demontaj'] else 'montaj'
 
-                        filename = os.path.basename(file_path)
-                        target_path = os.path.join(target_dir, filename)
-
-                        try:
-                            # Copy first, update DB, then remove original to avoid data loss on crash
-                            shutil.copy2(file_path, target_path)
-                            self.logger.info(f"📁 File {filename} copied to {os.path.basename(target_dir)}")
-
-                            self.telegram_client.db.update_ai_result(message_id, ai_result)
-                            self.logger.info(f"🤖 File {filename} classified as '{ai_result}' and saved to DB")
-
-                            # Remove original only after successful DB update
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
-
-                        except Exception as move_error:
-                            self.logger.error(f"❌ Error processing file {filename}: {move_error}")
-                            raise
+                        classification_results.append((message_id, file_path, ai_result))
 
                     except Exception as e:
-                        self.logger.error(f"❌ Error processing file {file_path}: {e}")
+                        self.logger.error(f"[{file_num}/{total_files}] ❌ Error classifying {os.path.basename(file_path)}: {e}")
+
+                # === Stage B: Post-process outliers (only for AI-classified photos) ===
+                if not is_vdo and not has_vdo_twin and len(classification_results) >= 3:
+                    from modules.ai_processor import find_outliers
+
+                    all_classifications = [r[2] for r in classification_results]
+                    outlier_indices = find_outliers(all_classifications)
+
+                    if outlier_indices:
+                        self.logger.info(f"{'='*60}")
+                        self.logger.info(
+                            f"🔍 STAGE 2: Re-analyzing {len(outlier_indices)} outlier(s) "
+                            f"out of {len(classification_results)} photos..."
+                        )
+                        self.logger.info(f"{'='*60}")
+
+                    for idx in outlier_indices:
+                        msg_id, fpath, old_result = classification_results[idx]
+                        # Build neighbor context window (up to 2 neighbors on each side)
+                        context = []
+                        for j in range(max(0, idx - 2), min(len(classification_results), idx + 3)):
+                            if j == idx:
+                                context.append('?')
+                            else:
+                                context.append(classification_results[j][2])
+
+                        try:
+                            reanalysis = asyncio.run_coroutine_threadsafe(
+                                ai_processor.reanalyze_with_context(
+                                    fpath,
+                                    equipment_lists['demontaj'],
+                                    equipment_lists['montaj'],
+                                    context,
+                                ),
+                                self.main_loop,
+                            ).result()
+
+                            new_result = 'demontaj' if reanalysis['is_demontaj'] else 'montaj'
+                            if new_result != old_result:
+                                self.logger.info(
+                                    f"🔄 CORRECTED: {os.path.basename(fpath)} "
+                                    f"{old_result.upper()} → {new_result.upper()}"
+                                )
+                                classification_results[idx] = (msg_id, fpath, new_result)
+                            else:
+                                self.logger.info(
+                                    f"✅ CONFIRMED: {os.path.basename(fpath)} "
+                                    f"stays {old_result.upper()}"
+                                )
+                        except Exception as e:
+                            self.logger.error(f"❌ Error re-analyzing outlier {os.path.basename(fpath)}: {e}")
+
+                # === Stage C: Move files and update DB ===
+                self.logger.info(f"{'='*60}")
+                self.logger.info(f"📁 STAGE 3: Moving {len(classification_results)} files to folders...")
+                self.logger.info(f"{'='*60}")
+                for message_id, file_path, ai_result in classification_results:
+                    target_dir = demontaj_dir if ai_result == 'demontaj' else montaj_dir
+                    filename = os.path.basename(file_path)
+                    target_path = os.path.join(target_dir, filename)
+
+                    try:
+                        shutil.copy2(file_path, target_path)
+                        self.telegram_client.db.update_ai_result(message_id, ai_result)
+
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+
+                    except Exception as move_error:
+                        self.logger.error(f"❌ Error processing file {filename}: {move_error}")
 
                 demontaj_count = len(os.listdir(demontaj_dir)) if os.path.exists(demontaj_dir) else 0
                 montaj_count = len(os.listdir(montaj_dir)) if os.path.exists(montaj_dir) else 0
@@ -415,14 +468,7 @@ class TaskQueue:
 
     def _packaging_phase(self, topic_id: int, topic_title: str, site_id: str, topic_dir: str, log_file_path: str, equipment_lists: Dict[str, List[str]]) -> str:
         """Packaging phase: create README and ZIP archive."""
-        text_messages = []
-        try:
-            with open(log_file_path, 'r', encoding='utf-8') as f:
-                text_messages = f.readlines()
-        except Exception:  # nosec B110 - log file is optional for README
-            pass
-
-        readme_path = create_readme_file(topic_dir, equipment_lists, text_messages)
+        readme_path = create_readme_file(topic_dir, equipment_lists)
         self.logger.info(f"📝 README.txt created: {readme_path}")
 
         output_folder = os.path.join(BASE_DIR, "output")
