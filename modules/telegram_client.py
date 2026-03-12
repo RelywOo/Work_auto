@@ -678,8 +678,8 @@ class TelegramClientManager:
         healthcheck_task = asyncio.create_task(self._healthcheck_loop())
 
         try:
-            await self.run_startup_recovery()
-            self.logger.info("🔄 Recovery complete, switching to message listening mode...")
+            # IMPORTANT: await self.run_startup_recovery()
+            # IMPORTANT: self.logger.info("🔄 Recovery complete, switching to message listening mode...")
 
             self.logger.info("👂 Listening for messages 24/7...")
             self.logger.info(f"⚙️ Processing queue running with {self.task_queue.max_workers} workers")
