@@ -8,12 +8,14 @@ from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
+
 def extract_site_id(topic_title: str) -> str:
     """Extract clean site ID from topic title using regex."""
-    match = re.search(r'(UA|UB)\d+', topic_title)
+    match = re.search(r"(UA|UB)\d+", topic_title)
     if match:
         return match.group(0)
     return f"topic_{topic_title}" if topic_title else "unknown"
+
 
 def safe_rmtree(path: str, retries: int = 5, delay: float = 1.0):
     """Robust folder deletion with retries and permission handling (for Windows WinError 5)."""
@@ -32,41 +34,51 @@ def safe_rmtree(path: str, retries: int = 5, delay: float = 1.0):
             return
         except Exception as e:
             if i < retries - 1:
-                logger.warning(f"⚠️ Attempt {i+1} to delete {path} failed ({e}). Waiting {delay}s...")
+                logger.warning(
+                    f"⚠️ Attempt {i + 1} to delete {path} failed ({e}). Waiting {delay}s..."
+                )
                 time.sleep(delay)
             else:
-                logger.error(f"❌ Failed to delete folder {path} after {retries} attempts: {e}")
+                logger.error(
+                    f"❌ Failed to delete folder {path} after {retries} attempts: {e}"
+                )
+
 
 def create_readme_file(topic_dir: str, equipment_lists: Dict[str, List[str]]) -> str:
     """Create README.txt report with equipment lists."""
-    readme_path = os.path.join(topic_dir, 'README.txt')
+    readme_path = os.path.join(topic_dir, "README.txt")
 
-    with open(readme_path, 'w', encoding='utf-8') as f:
+    with open(readme_path, "w", encoding="utf-8") as f:
         # User-facing report content (Russian)
         f.write("ОТЧЕТ О РАБОТАХ ПО САЙТУ\n")
         f.write("=" * 40 + "\n\n")
 
-        if equipment_lists['demontaj']:
+        if equipment_lists["demontaj"]:
             f.write("ОБОРУДОВАНИЕ НА ДЕМОНТАЖ:\n")
-            for item in equipment_lists['demontaj']:
+            for item in equipment_lists["demontaj"]:
                 f.write(f"- {item}\n")
             f.write("\n")
 
-        if equipment_lists['montaj']:
+        if equipment_lists["montaj"]:
             f.write("ОБОРУДОВАНИЕ НА МОНТАЖ:\n")
-            for item in equipment_lists['montaj']:
+            for item in equipment_lists["montaj"]:
                 f.write(f"- {item}\n")
             f.write("\n")
 
     return readme_path
 
-def create_zip_report(site_id: str, source_folder: str, output_folder: str, topic_title: str) -> str:
+
+def create_zip_report(
+    site_id: str, source_folder: str, output_folder: str, topic_title: str
+) -> str:
     """Create a ZIP archive with Demontaj/Montaj photos and README.txt."""
     os.makedirs(output_folder, exist_ok=True)
 
     # Add suffix based on topic type
     topic_title_upper = topic_title.upper()
-    suffix = "_VDO" if "VDO" in topic_title_upper or "ВДО" in topic_title_upper else "_MAIN"
+    suffix = (
+        "_VDO" if "VDO" in topic_title_upper or "ВДО" in topic_title_upper else "_MAIN"
+    )
 
     zip_path = os.path.join(output_folder, f"{site_id}{suffix}")
 
@@ -90,7 +102,7 @@ def create_zip_report(site_id: str, source_folder: str, output_folder: str, topi
         if os.path.exists(readme_path):
             shutil.copy2(readme_path, temp_folder)
 
-        shutil.make_archive(zip_path, 'zip', temp_folder)
+        shutil.make_archive(zip_path, "zip", temp_folder)
 
         safe_rmtree(temp_folder)
 

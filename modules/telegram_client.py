@@ -15,17 +15,19 @@ from modules.database import DatabaseManager
 import time
 
 # Configuration constants
-DEFAULT_WAIT_TIME = 300          # seconds to wait for topic inactivity before processing
-DEFAULT_MAX_WORKERS = 2          # number of parallel processing workers
-TOPIC_CACHE_TTL = 3600           # seconds to cache topic titles (1 hour)
-DEFAULT_PHOTO_LIMIT = 100        # max messages to scan for photos
-HEARTBEAT_INTERVAL = 30          # seconds between heartbeat file updates
+DEFAULT_WAIT_TIME = 300  # seconds to wait for topic inactivity before processing
+DEFAULT_MAX_WORKERS = 2  # number of parallel processing workers
+TOPIC_CACHE_TTL = 3600  # seconds to cache topic titles (1 hour)
+DEFAULT_PHOTO_LIMIT = 100  # max messages to scan for photos
+HEARTBEAT_INTERVAL = 30  # seconds between heartbeat file updates
 DEFAULT_HEALTHCHECK_INTERVAL = 3600  # seconds between Telegram healthcheck reports
-MAX_TOPIC_CACHE_SIZE = 500           # max entries in topic title cache
-MAX_HEALTHCHECK_FAILURES = 5         # consecutive healthcheck failures before alert
+MAX_TOPIC_CACHE_SIZE = 500  # max entries in topic title cache
+MAX_HEALTHCHECK_FAILURES = 5  # consecutive healthcheck failures before alert
+
 
 def with_retry(max_retries=3, base_delay=2):
     """Decorator for retrying async Telegram API calls on errors (including FloodWait)."""
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -35,32 +37,43 @@ def with_retry(max_retries=3, base_delay=2):
                     return await func(*args, **kwargs)
                 except FloodWaitError as e:
                     wait_time = e.seconds
-                    logger.warning(f"FloodWaitError in {func.__name__}: waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
+                    logger.warning(
+                        f"FloodWaitError in {func.__name__}: waiting {wait_time}s (attempt {attempt + 1}/{max_retries})"
+                    )
                     await asyncio.sleep(wait_time)
                 except Exception as e:
-                    logger.warning(f"{type(e).__name__} in {func.__name__} (attempt {attempt+1}/{max_retries}): {e}")
+                    logger.warning(
+                        f"{type(e).__name__} in {func.__name__} (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
                     if attempt == max_retries - 1:
                         raise
-                    await asyncio.sleep(base_delay * (2 ** attempt))
+                    await asyncio.sleep(base_delay * (2**attempt))
             raise Exception(f"Max retries ({max_retries}) exceeded for {func.__name__}")
+
         return wrapper
+
     return decorator
+
 
 class TelegramClientManager:
     def __init__(self) -> None:
         self.client = TelegramClient(
-            os.getenv('SESSION_FILE', 'session_name.session'),
-            int(os.getenv('TELEGRAM_API_ID')),
-            os.getenv('TELEGRAM_API_HASH')
+            os.getenv("SESSION_FILE", "session_name.session"),
+            int(os.getenv("TELEGRAM_API_ID")),
+            os.getenv("TELEGRAM_API_HASH"),
         )
         self.logger = logging.getLogger(__name__)
         self.active_topics = {}  # Track active topics and their timers
-        self._active_topics_lock = asyncio.Lock()  # Lock for atomic access to active_topics
-        self.wait_time = int(os.getenv('WAIT_TIME', str(DEFAULT_WAIT_TIME)))
-        max_workers = int(os.getenv('MAX_WORKERS', str(DEFAULT_MAX_WORKERS)))
+        self._active_topics_lock = (
+            asyncio.Lock()
+        )  # Lock for atomic access to active_topics
+        self.wait_time = int(os.getenv("WAIT_TIME", str(DEFAULT_WAIT_TIME)))
+        max_workers = int(os.getenv("MAX_WORKERS", str(DEFAULT_MAX_WORKERS)))
         self.task_queue = TaskQueue(max_workers=max_workers, telegram_client=self)
-        self.db = DatabaseManager(os.getenv('DB_PATH', 'bot_memory.db'))
-        self._topic_cache: OrderedDict = OrderedDict()  # topic_id -> (title, expiry_time)
+        self.db = DatabaseManager(os.getenv("DB_PATH", "bot_memory.db"))
+        self._topic_cache: OrderedDict = (
+            OrderedDict()
+        )  # topic_id -> (title, expiry_time)
 
     async def connect(self) -> None:
         """Connect to Telegram and authenticate if needed."""
@@ -69,12 +82,12 @@ class TelegramClientManager:
 
             if not await self.client.is_user_authorized():
                 self.logger.info("Sending code request...")
-                await self.client.send_code_request(os.getenv('TELEGRAM_PHONE_NUMBER'))
+                await self.client.send_code_request(os.getenv("TELEGRAM_PHONE_NUMBER"))
 
                 code = input("Enter the code you received: ")
 
                 try:
-                    await self.client.sign_in(os.getenv('TELEGRAM_PHONE_NUMBER'), code)
+                    await self.client.sign_in(os.getenv("TELEGRAM_PHONE_NUMBER"), code)
                 except SessionPasswordNeededError:
                     self.logger.info("Two-factor authentication is enabled")
                     password = getpass.getpass("Enter your 2FA password: ")
@@ -94,7 +107,7 @@ class TelegramClientManager:
     async def get_chat_topics(self, limit: int = 1) -> List[Dict[str, Any]]:
         """Get latest topics containing UA or UB from the target chat."""
         try:
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
             collected_topics = []
 
             offset_date = 0
@@ -104,30 +117,36 @@ class TelegramClientManager:
             self.logger.info(f"Searching for {limit} latest UA/UB topics...")
 
             while len(collected_topics) < limit:
-                result = await self.client(GetForumTopicsRequest(
-                    peer=chat,
-                    q='',
-                    offset_date=offset_date,
-                    offset_id=offset_id,
-                    offset_topic=offset_topic,
-                    limit=100
-                ))
+                result = await self.client(
+                    GetForumTopicsRequest(
+                        peer=chat,
+                        q="",
+                        offset_date=offset_date,
+                        offset_id=offset_id,
+                        offset_topic=offset_topic,
+                        limit=100,
+                    )
+                )
 
-                if not getattr(result, 'topics', []):
+                if not getattr(result, "topics", []):
                     break
 
                 for topic in result.topics:
                     title_upper = topic.title.upper()
 
                     # Match 'UA' or 'UB' but exclude TSS/TSSR topics
-                    if ('UA' in title_upper or 'UB' in title_upper) and ('TSS' not in title_upper and 'TSSR' not in title_upper):
+                    if ("UA" in title_upper or "UB" in title_upper) and (
+                        "TSS" not in title_upper and "TSSR" not in title_upper
+                    ):
                         topic_info = {
-                            'topic_id': topic.id,
-                            'title': topic.title,
-                            'date': getattr(topic, 'date', None)
+                            "topic_id": topic.id,
+                            "title": topic.title,
+                            "date": getattr(topic, "date", None),
                         }
                         collected_topics.append(topic_info)
-                        self.logger.info(f"✅ Found topic: {topic.title} (ID: {topic.id})")
+                        self.logger.info(
+                            f"✅ Found topic: {topic.title} (ID: {topic.id})"
+                        )
 
                         if len(collected_topics) == limit:
                             break
@@ -135,7 +154,7 @@ class TelegramClientManager:
                 if len(collected_topics) == limit:
                     break
 
-                if getattr(result, 'messages', []):
+                if getattr(result, "messages", []):
                     last_msg = result.messages[-1]
                     offset_date = int(last_msg.date.timestamp())
                     offset_id = last_msg.id
@@ -154,26 +173,34 @@ class TelegramClientManager:
     def _create_topic_folder(self, topic_id: int) -> str:
         """Create folder for topic downloads."""
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        download_dir = os.path.join(base_dir, os.getenv('DOWNLOADS_DIR', 'downloads'), f"topic_{topic_id}")
+        download_dir = os.path.join(
+            base_dir, os.getenv("DOWNLOADS_DIR", "downloads"), f"topic_{topic_id}"
+        )
         os.makedirs(download_dir, exist_ok=True)
         self.logger.info(f"Created topic folder: {download_dir}")
         return download_dir
 
-    def _save_message_to_log(self, topic_dir: str, message_data: Dict[str, Any]) -> None:
+    def _save_message_to_log(
+        self, topic_dir: str, message_data: Dict[str, Any]
+    ) -> None:
         """Save message text to log file with proper formatting."""
-        if not message_data.get('text'):
+        if not message_data.get("text"):
             return
 
-        log_file = os.path.join(topic_dir, 'messages_log.txt')
-        timestamp = message_data['date'].strftime('%Y-%m-%d %H:%M:%S')
-        log_entry = f"[{timestamp}] | [{message_data['id']}] | {message_data['text']}\n{'='*50}\n"
+        log_file = os.path.join(topic_dir, "messages_log.txt")
+        timestamp = message_data["date"].strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] | [{message_data['id']}] | {message_data['text']}\n{'=' * 50}\n"
 
-        with open(log_file, 'a', encoding='utf-8') as f:
+        with open(log_file, "a", encoding="utf-8") as f:
             f.write(log_entry)
 
-        self.logger.info(f"Text message found (ID: {message_data['id']}), saved to log.")
+        self.logger.info(
+            f"Text message found (ID: {message_data['id']}), saved to log."
+        )
 
-    async def download_topic_content(self, topic_id: int, photo_message_limit: int = 100) -> Dict[str, int]:
+    async def download_topic_content(
+        self, topic_id: int, photo_message_limit: int = 100
+    ) -> Dict[str, int]:
         """Download all text messages and photos from a specific Telegram topic.
 
         Args:
@@ -186,31 +213,34 @@ class TelegramClientManager:
         try:
             topic_dir = self._create_topic_folder(topic_id)
             last_msg_id = self.db.get_last_msg_id(topic_id)
-            
+
             # Fetch topic title early to ensure the topic exists in the DB before messages are saved
             topic_title = await self.get_topic_title_by_id(topic_id)
             title = topic_title or f"Topic {topic_id}"
-            
+
             # If it's a new topic, create the record now to satisfy FK constraints in processed_messages
             if last_msg_id is None:
                 self.db.update_topic(topic_id, title, 0)
-                self.logger.info(f"🆕 New topic {topic_id} ('{title}') initialized in DB")
+                self.logger.info(
+                    f"🆕 New topic {topic_id} ('{title}') initialized in DB"
+                )
 
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
             photos_count = 0
             text_count = 0
             max_message_id = 0
 
-            self.logger.info(f"Starting topic {topic_id} download... (last_msg_id: {last_msg_id})")
+            self.logger.info(
+                f"Starting topic {topic_id} download... (last_msg_id: {last_msg_id})"
+            )
 
-            iter_params = {
-                'entity': chat,
-                'reply_to': topic_id
-            }
+            iter_params = {"entity": chat, "reply_to": topic_id}
 
             if last_msg_id is not None:
-                iter_params['min_id'] = last_msg_id
-                self.logger.info(f"Using min_id={last_msg_id} to download only new messages")
+                iter_params["min_id"] = last_msg_id
+                self.logger.info(
+                    f"Using min_id={last_msg_id} to download only new messages"
+                )
 
             # Optimization: fetch all processed IDs for this topic in one query
             processed_msg_ids = self.db.get_processed_message_ids(topic_id)
@@ -219,12 +249,12 @@ class TelegramClientManager:
             async for message in self.client.iter_messages(**iter_params):
                 messages_iterated += 1
                 message_data = {
-                    'id': message.id,
-                    'date': message.date,
-                    'text': message.text,
-                    'media_group_id': getattr(message, 'grouped_id', None),
-                    'has_media': bool(message.media),
-                    'media_type': None
+                    "id": message.id,
+                    "date": message.date,
+                    "text": message.text,
+                    "media_group_id": getattr(message, "grouped_id", None),
+                    "has_media": bool(message.media),
+                    "media_type": None,
                 }
 
                 if message.id > max_message_id:
@@ -233,18 +263,26 @@ class TelegramClientManager:
                 # Handle text content
                 if message.text:
                     if message.id in processed_msg_ids:
-                        self.logger.info(f"Text message {message.id} already processed, skipping")
+                        self.logger.info(
+                            f"Text message {message.id} already processed, skipping"
+                        )
                         continue
 
                     self._save_message_to_log(topic_dir, message_data)
                     text_count += 1
-                    self.db.save_message(message.id, topic_id, 'text')
+                    self.db.save_message(message.id, topic_id, "text")
                     processed_msg_ids.add(message.id)
 
                 # Handle media content
-                if messages_iterated <= photo_message_limit and message.media and isinstance(message.media, MessageMediaPhoto):
+                if (
+                    messages_iterated <= photo_message_limit
+                    and message.media
+                    and isinstance(message.media, MessageMediaPhoto)
+                ):
                     if message.id in processed_msg_ids:
-                        self.logger.info(f"Message {message.id} already processed, skipping")
+                        self.logger.info(
+                            f"Message {message.id} already processed, skipping"
+                        )
                         continue
 
                     self.logger.info(f"Downloading photo (ID: {message.id})...")
@@ -256,41 +294,51 @@ class TelegramClientManager:
                     for attempt in range(max_retries):
                         try:
                             downloaded_path = await self.client.download_media(
-                                message,
-                                file=file_path
+                                message, file=file_path
                             )
 
                             if downloaded_path:
                                 photos_count += 1
-                                self.logger.info(f"Photo downloaded successfully: {downloaded_path}")
-                                self.db.save_message(message.id, topic_id, 'photo', downloaded_path)
+                                self.logger.info(
+                                    f"Photo downloaded successfully: {downloaded_path}"
+                                )
+                                self.db.save_message(
+                                    message.id, topic_id, "photo", downloaded_path
+                                )
                                 processed_msg_ids.add(message.id)
 
                             await asyncio.sleep(0.5)
                             break
 
                         except FloodWaitError as e:
-                            self.logger.warning(f"Flood wait (attempt {attempt+1}/{max_retries}): {e.seconds}s")
+                            self.logger.warning(
+                                f"Flood wait (attempt {attempt + 1}/{max_retries}): {e.seconds}s"
+                            )
                             await asyncio.sleep(e.seconds)
                             if attempt == max_retries - 1:
-                                self.logger.error(f"Max retries exceeded downloading photo: {message.id}")
+                                self.logger.error(
+                                    f"Max retries exceeded downloading photo: {message.id}"
+                                )
 
                 await asyncio.sleep(0.2)
 
             if max_message_id > 0:
                 self.db.update_topic(topic_id, title, max_message_id)
-                self.logger.info(f"DB updated: topic_id={topic_id}, last_msg_id={max_message_id}")
+                self.logger.info(
+                    f"DB updated: topic_id={topic_id}, last_msg_id={max_message_id}"
+                )
 
-            self.logger.info(f"Topic download complete. Downloaded {photos_count} photos and {text_count} text messages.")
+            self.logger.info(
+                f"Topic download complete. Downloaded {photos_count} photos and {text_count} text messages."
+            )
 
             # DEBUG: check DB visibility from the same thread that wrote the data
             debug_count = len(self.db.get_unprocessed_files(topic_id))
-            self.logger.info(f"DEBUG [same thread]: unprocessed files in DB right after download = {debug_count}")
+            self.logger.info(
+                f"DEBUG [same thread]: unprocessed files in DB right after download = {debug_count}"
+            )
 
-            return {
-                'text_messages': text_count,
-                'photos': photos_count
-            }
+            return {"text_messages": text_count, "photos": photos_count}
 
         except Exception as e:
             self.logger.error(f"Error downloading topic {topic_id}: {e}")
@@ -311,15 +359,17 @@ class TelegramClientManager:
                 del self._topic_cache[topic_id]
 
         try:
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
-            topics_result = await self.client(GetForumTopicsRequest(
-                peer=chat,
-                q='',
-                offset_date=0,
-                offset_id=0,
-                offset_topic=0,
-                limit=100
-            ))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
+            topics_result = await self.client(
+                GetForumTopicsRequest(
+                    peer=chat,
+                    q="",
+                    offset_date=0,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=100,
+                )
+            )
 
             # Cache all fetched topics for 1 hour (3600 seconds)
             for topic in topics_result.topics:
@@ -345,28 +395,40 @@ class TelegramClientManager:
             return None
 
         try:
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
-            result = await self.client(GetForumTopicsRequest(
-                peer=chat,
-                q=site_id,
-                offset_date=0,
-                offset_id=0,
-                offset_topic=0,
-                limit=100
-            ))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
+            result = await self.client(
+                GetForumTopicsRequest(
+                    peer=chat,
+                    q=site_id,
+                    offset_date=0,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=100,
+                )
+            )
 
-            if not getattr(result, 'topics', []):
+            if not getattr(result, "topics", []):
                 return None
 
             for topic in result.topics:
                 title_upper = topic.title.upper()
-                if site_id.upper() in title_upper and 'VDO' not in title_upper and 'ВДО' not in title_upper and 'TSS' not in title_upper and 'TSSR' not in title_upper:
-                    self.logger.info(f"✅ Found main topic for VDO (site {site_id}): {topic.title} (ID: {topic.id})")
+                if (
+                    site_id.upper() in title_upper
+                    and "VDO" not in title_upper
+                    and "ВДО" not in title_upper
+                    and "TSS" not in title_upper
+                    and "TSSR" not in title_upper
+                ):
+                    self.logger.info(
+                        f"✅ Found main topic for VDO (site {site_id}): {topic.title} (ID: {topic.id})"
+                    )
                     return topic.id
 
             return None
         except Exception as e:
-            self.logger.error(f"Error searching main topic for VDO (site_id={site_id}): {e}")
+            self.logger.error(
+                f"Error searching main topic for VDO (site_id={site_id}): {e}"
+            )
             return None
 
     @with_retry(max_retries=3)
@@ -376,32 +438,45 @@ class TelegramClientManager:
             return None
 
         try:
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
-            result = await self.client(GetForumTopicsRequest(
-                peer=chat,
-                q=site_id,
-                offset_date=0,
-                offset_id=0,
-                offset_topic=0,
-                limit=100
-            ))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
+            result = await self.client(
+                GetForumTopicsRequest(
+                    peer=chat,
+                    q=site_id,
+                    offset_date=0,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=100,
+                )
+            )
 
-            if not getattr(result, 'topics', []):
+            if not getattr(result, "topics", []):
                 return None
 
             for topic in result.topics:
                 title_upper = topic.title.upper()
-                if site_id.upper() in title_upper and ('VDO' in title_upper or 'ВДО' in title_upper) and 'TSS' not in title_upper and 'TSSR' not in title_upper:
-                    self.logger.info(f"✅ Found VDO twin for main topic (site {site_id}): {topic.title} (ID: {topic.id})")
+                if (
+                    site_id.upper() in title_upper
+                    and ("VDO" in title_upper or "ВДО" in title_upper)
+                    and "TSS" not in title_upper
+                    and "TSSR" not in title_upper
+                ):
+                    self.logger.info(
+                        f"✅ Found VDO twin for main topic (site {site_id}): {topic.title} (ID: {topic.id})"
+                    )
                     return topic.id
 
             return None
         except Exception as e:
-            self.logger.error(f"Error searching VDO twin for main topic (site_id={site_id}): {e}")
+            self.logger.error(
+                f"Error searching VDO twin for main topic (site_id={site_id}): {e}"
+            )
             return None
 
     @with_retry(max_retries=3)
-    async def download_topic_photos_to_dir(self, topic_id: int, target_dir: str, photo_message_limit: int = 100) -> int:
+    async def download_topic_photos_to_dir(
+        self, topic_id: int, target_dir: str, photo_message_limit: int = 100
+    ) -> int:
         """Download all photos from a topic directly to a specified directory.
 
         Args:
@@ -413,7 +488,7 @@ class TelegramClientManager:
             Number of photos downloaded.
         """
         os.makedirs(target_dir, exist_ok=True)
-        chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+        chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
         photos_count = 0
         messages_iterated = 0
 
@@ -427,39 +502,53 @@ class TelegramClientManager:
                 file_path = os.path.join(target_dir, file_name)
 
                 try:
-                    downloaded_path = await self.client.download_media(message, file=file_path)
+                    downloaded_path = await self.client.download_media(
+                        message, file=file_path
+                    )
                     if downloaded_path:
                         photos_count += 1
                         self.logger.info(f"📸 Main topic photo downloaded: {file_name}")
                     await asyncio.sleep(0.5)
                 except FloodWaitError as e:
-                    self.logger.warning(f"FloodWait downloading main topic photo: {e.seconds}s")
+                    self.logger.warning(
+                        f"FloodWait downloading main topic photo: {e.seconds}s"
+                    )
                     await asyncio.sleep(e.seconds)
 
             await asyncio.sleep(0.2)
 
-        self.logger.info(f"📸 Downloaded {photos_count} photos from main topic {topic_id}")
+        self.logger.info(
+            f"📸 Downloaded {photos_count} photos from main topic {topic_id}"
+        )
         return photos_count
 
     @with_retry(max_retries=3)
     async def get_topic_text_log(self, topic_id: int) -> str:
         """Download text messages from the specified topic, chronologically sorted."""
         try:
-            chat = await self.client.get_entity(int(os.getenv('TARGET_CHAT_ID')))
+            chat = await self.client.get_entity(int(os.getenv("TARGET_CHAT_ID")))
             messages_text = []
 
             # reverse=True fetches older messages first
-            async for message in self.client.iter_messages(entity=chat, reply_to=topic_id, reverse=True):
+            async for message in self.client.iter_messages(
+                entity=chat, reply_to=topic_id, reverse=True
+            ):
                 if message.text:
-                    timestamp = message.date.strftime('%Y-%m-%d %H:%M:%S')
-                    log_entry = f"[{timestamp}] | [{message.id}] | {message.text}\n{'='*50}\n"
+                    timestamp = message.date.strftime("%Y-%m-%d %H:%M:%S")
+                    log_entry = (
+                        f"[{timestamp}] | [{message.id}] | {message.text}\n{'=' * 50}\n"
+                    )
                     messages_text.append(log_entry)
 
-            self.logger.info(f"Collected {len(messages_text)} text messages from topic {topic_id}")
+            self.logger.info(
+                f"Collected {len(messages_text)} text messages from topic {topic_id}"
+            )
             return "".join(messages_text)
 
         except Exception as e:
-            self.logger.error(f"Error collecting text messages from topic {topic_id}: {e}")
+            self.logger.error(
+                f"Error collecting text messages from topic {topic_id}: {e}"
+            )
             return ""
 
     def should_process_topic(self, topic_title: str) -> bool:
@@ -468,27 +557,33 @@ class TelegramClientManager:
             return False
 
         title_upper = topic_title.upper()
-        return ('UA' in title_upper or 'UB' in title_upper) and ('TSS' not in title_upper and 'TSSR' not in title_upper)
+        return ("UA" in title_upper or "UB" in title_upper) and (
+            "TSS" not in title_upper and "TSSR" not in title_upper
+        )
 
     async def reset_topic_timer(self, topic_id: int, topic_title: str) -> None:
         """Reset or create a timer for the given topic."""
         async with self._active_topics_lock:
             if topic_id in self.active_topics:
-                self.active_topics[topic_id]['last_message_time'] = datetime.now()
-                self.logger.info(f"🔄 Timer reset for topic {topic_title} (ID: {topic_id})")
+                self.active_topics[topic_id]["last_message_time"] = datetime.now()
+                self.logger.info(
+                    f"🔄 Timer reset for topic {topic_title} (ID: {topic_id})"
+                )
                 return
 
             self.active_topics[topic_id] = {
-                'last_message_time': datetime.now(),
-                'timer_task': None,
-                'message_count': 1,
-                'title': topic_title
+                "last_message_time": datetime.now(),
+                "timer_task": None,
+                "message_count": 1,
+                "title": topic_title,
             }
 
-            self.logger.info(f"🆕 Activity in topic {topic_title} (ID: {topic_id}), waiting for upload to finish...")
+            self.logger.info(
+                f"🆕 Activity in topic {topic_title} (ID: {topic_id}), waiting for upload to finish..."
+            )
 
             task = asyncio.create_task(self._topic_timer_handler(topic_id))
-            self.active_topics[topic_id]['timer_task'] = task
+            self.active_topics[topic_id]["timer_task"] = task
 
     async def _topic_timer_handler(self, topic_id: int) -> None:
         """Timer handler for a topic — waits for inactivity, then queues processing."""
@@ -498,13 +593,17 @@ class TelegramClientManager:
                     if topic_id not in self.active_topics:
                         return
 
-                    last_message_time = self.active_topics[topic_id]['last_message_time']
+                    last_message_time = self.active_topics[topic_id][
+                        "last_message_time"
+                    ]
                     time_since_last = datetime.now() - last_message_time
                     wait_duration = timedelta(seconds=self.wait_time)
 
                     if time_since_last >= wait_duration:
-                        topic_title = self.active_topics[topic_id]['title']
-                        self.logger.info(f"⏰ Timer expired for topic {topic_title} (ID: {topic_id}), starting data collection")
+                        topic_title = self.active_topics[topic_id]["title"]
+                        self.logger.info(
+                            f"⏰ Timer expired for topic {topic_title} (ID: {topic_id}), starting data collection"
+                        )
 
                         # Atomically remove from active and add to queue
                         del self.active_topics[topic_id]
@@ -521,8 +620,9 @@ class TelegramClientManager:
         except Exception as e:
             self.logger.error(f"Error in timer handler for topic {topic_id}: {e}")
 
-
-    async def add_topic_to_queue(self, topic_id: int, topic_title: Optional[str] = None) -> None:
+    async def add_topic_to_queue(
+        self, topic_id: int, topic_title: Optional[str] = None
+    ) -> None:
         """Add topic to the processing queue instead of processing immediately."""
         try:
             if not topic_title:
@@ -547,21 +647,27 @@ class TelegramClientManager:
             unprocessed_topics = self.db.get_topics_with_unprocessed_files()
             if unprocessed_topics:
                 recovery_topics.update(unprocessed_topics)
-                self.logger.info(f"🔍 Found {len(unprocessed_topics)} topics with unprocessed AI files: {unprocessed_topics}")
+                self.logger.info(
+                    f"🔍 Found {len(unprocessed_topics)} topics with unprocessed AI files: {unprocessed_topics}"
+                )
             else:
                 self.logger.info("✅ No topics with unprocessed AI files found")
 
             # Download recovery: check recent active topics
             recent_topics = await self.get_chat_topics(limit=5)
             if recent_topics:
-                recent_topic_ids = [topic['topic_id'] for topic in recent_topics]
+                recent_topic_ids = [topic["topic_id"] for topic in recent_topics]
                 recovery_topics.update(recent_topic_ids)
-                self.logger.info(f"🔍 Checking {len(recent_topics)} recent active topic(s) for missed messages: {recent_topic_ids}")
+                self.logger.info(
+                    f"🔍 Checking {len(recent_topics)} recent active topic(s) for missed messages: {recent_topic_ids}"
+                )
             else:
                 self.logger.info("✅ No recent active topics found")
 
             if recovery_topics:
-                self.logger.info(f"📋 Adding {len(recovery_topics)} topics to recovery queue: {list(recovery_topics)}")
+                self.logger.info(
+                    f"📋 Adding {len(recovery_topics)} topics to recovery queue: {list(recovery_topics)}"
+                )
                 for topic_id in recovery_topics:
                     await self.add_topic_to_queue(topic_id)
             else:
@@ -575,7 +681,7 @@ class TelegramClientManager:
     def setup_event_handler(self, process_callback: Any = None) -> None:
         """Set up the event handler for new messages."""
 
-        @self.client.on(events.NewMessage(chats=int(os.getenv('TARGET_CHAT_ID'))))
+        @self.client.on(events.NewMessage(chats=int(os.getenv("TARGET_CHAT_ID"))))
         async def new_message_handler(event):
             try:
                 message = event.message
@@ -596,7 +702,9 @@ class TelegramClientManager:
                     self.logger.debug(f"🚫 Topic '{topic_title}' ignored (not UA/UB)")
                     return
 
-                self.logger.debug(f"📨 New message in topic '{topic_title}' (ID: {topic_id})")
+                self.logger.debug(
+                    f"📨 New message in topic '{topic_title}' (ID: {topic_id})"
+                )
 
                 await self.reset_topic_timer(topic_id, topic_title)
 
@@ -604,7 +712,9 @@ class TelegramClientManager:
                 self.logger.exception("Critical error in Telegram new_message_handler")
                 try:
                     # User-facing alert (Russian)
-                    await self.send_message_with_retry('me', f"🚨 Ошибка в `new_message_handler`:\n`{str(e)}`")
+                    await self.send_message_with_retry(
+                        "me", f"🚨 Ошибка в `new_message_handler`:\n`{str(e)}`"
+                    )
                 except Exception as alert_error:
                     self.logger.error(f"Failed to send error alert: {alert_error}")
 
@@ -613,15 +723,20 @@ class TelegramClientManager:
     def _write_heartbeat(self) -> None:
         """Write a marker file for Docker HEALTHCHECK."""
         try:
-            heartbeat_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'healthcheck')
-            with open(heartbeat_path, 'w') as f:
+            heartbeat_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "healthcheck",
+            )
+            with open(heartbeat_path, "w") as f:
                 f.write(str(asyncio.get_event_loop().time()))
         except Exception:  # nosec B110 - heartbeat failure is non-critical
             pass
 
     async def _healthcheck_loop(self) -> None:
         """Periodically send healthcheck messages and update the heartbeat file."""
-        healthcheck_interval = int(os.getenv('HEALTHCHECK_INTERVAL', str(DEFAULT_HEALTHCHECK_INTERVAL)))
+        healthcheck_interval = int(
+            os.getenv("HEALTHCHECK_INTERVAL", str(DEFAULT_HEALTHCHECK_INTERVAL))
+        )
         heartbeat_interval = HEARTBEAT_INTERVAL
         time_since_last_report = 0
         consecutive_failures = 0
@@ -640,14 +755,16 @@ class TelegramClientManager:
                     # User-facing message (Russian)
                     message = f"🟢 Бот жив. Топиков в БД: {count}.\n📊 {metrics}"
                     self.logger.info(f"Sending healthcheck: {message}")
-                    await self.send_message_with_retry('me', message)
+                    await self.send_message_with_retry("me", message)
                     consecutive_failures = 0
             except asyncio.CancelledError:
                 self.logger.debug("Healthcheck loop cancelled")
                 break
             except Exception as e:
                 consecutive_failures += 1
-                self.logger.error(f"Error in healthcheck loop ({consecutive_failures}/{MAX_HEALTHCHECK_FAILURES}): {e}")
+                self.logger.error(
+                    f"Error in healthcheck loop ({consecutive_failures}/{MAX_HEALTHCHECK_FAILURES}): {e}"
+                )
                 if consecutive_failures >= MAX_HEALTHCHECK_FAILURES:
                     self.logger.critical(
                         f"Healthcheck failed {consecutive_failures} times in a row! "
@@ -655,11 +772,13 @@ class TelegramClientManager:
                     )
                     try:
                         await self.send_message_with_retry(
-                            'me',
-                            f"🚨 Healthcheck не работает уже {consecutive_failures} раз подряд! Проверьте бота."
+                            "me",
+                            f"🚨 Healthcheck не работает уже {consecutive_failures} раз подряд! Проверьте бота.",
                         )
                     except Exception as alert_err:
-                        self.logger.debug(f"Failed to send healthcheck alert: {alert_err}")
+                        self.logger.debug(
+                            f"Failed to send healthcheck alert: {alert_err}"
+                        )
                     consecutive_failures = 0
                 await asyncio.sleep(60)
 
@@ -679,10 +798,14 @@ class TelegramClientManager:
 
         try:
             await self.run_startup_recovery()
-            self.logger.info("🔄 Recovery complete, switching to message listening mode...")
+            self.logger.info(
+                "🔄 Recovery complete, switching to message listening mode..."
+            )
 
             self.logger.info("👂 Listening for messages 24/7...")
-            self.logger.info(f"⚙️ Processing queue running with {self.task_queue.max_workers} workers")
+            self.logger.info(
+                f"⚙️ Processing queue running with {self.task_queue.max_workers} workers"
+            )
 
             await self.client.run_until_disconnected()
 

@@ -12,26 +12,32 @@ load_dotenv()
 
 # Configure logging with absolute paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.handlers.RotatingFileHandler(os.path.join(LOG_DIR, 'bot.log'), maxBytes=5*1024*1024, backupCount=5, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+        logging.handlers.RotatingFileHandler(
+            os.path.join(LOG_DIR, "bot.log"),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
+        logging.StreamHandler(),
+    ],
 )
 
 logger = logging.getLogger(__name__)
 
+
 def validate_env() -> None:
     """Validate presence and correctness of required environment variables."""
     required_vars = [
-        'TELEGRAM_API_ID',
-        'TELEGRAM_API_HASH',
-        'TARGET_CHAT_ID',
-        'GEMINI_API_KEY'
+        "TELEGRAM_API_ID",
+        "TELEGRAM_API_HASH",
+        "TARGET_CHAT_ID",
+        "GEMINI_API_KEY",
     ]
 
     missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -41,21 +47,21 @@ def validate_env() -> None:
         raise EnvironmentError(error_msg)
 
     try:
-        int(os.getenv('TELEGRAM_API_ID'))
+        int(os.getenv("TELEGRAM_API_ID"))
     except (TypeError, ValueError):
         error_msg = "CRITICAL: TELEGRAM_API_ID must be an integer."
         logger.error(error_msg)
         raise EnvironmentError(error_msg)
 
     try:
-        int(os.getenv('TARGET_CHAT_ID'))
+        int(os.getenv("TARGET_CHAT_ID"))
     except (TypeError, ValueError):
         error_msg = "CRITICAL: TARGET_CHAT_ID must be an integer."
         logger.error(error_msg)
         raise EnvironmentError(error_msg)
 
     # Validate WAIT_TIME if provided
-    wait_time_str = os.getenv('WAIT_TIME')
+    wait_time_str = os.getenv("WAIT_TIME")
     if wait_time_str is not None:
         try:
             wait_time = int(wait_time_str)
@@ -69,7 +75,7 @@ def validate_env() -> None:
             raise EnvironmentError(error_msg)
 
     # Validate MAX_WORKERS if provided
-    max_workers_str = os.getenv('MAX_WORKERS')
+    max_workers_str = os.getenv("MAX_WORKERS")
     if max_workers_str is not None:
         try:
             max_workers = int(max_workers_str)
@@ -81,6 +87,7 @@ def validate_env() -> None:
             error_msg = "CRITICAL: MAX_WORKERS must be an integer."
             logger.error(error_msg)
             raise EnvironmentError(error_msg)
+
 
 async def main() -> None:
     """Main entry point for Telegram bot - autonomous mode only."""
@@ -98,12 +105,18 @@ async def main() -> None:
             asyncio.create_task(telegram_client.client.disconnect())
 
     try:
-        if os.name == 'nt':
-            signal.signal(signal.SIGINT, lambda s, f: loop.call_soon_threadsafe(handle_signal, s))
-            signal.signal(signal.SIGTERM, lambda s, f: loop.call_soon_threadsafe(handle_signal, s))
+        if os.name == "nt":
+            signal.signal(
+                signal.SIGINT, lambda s, f: loop.call_soon_threadsafe(handle_signal, s)
+            )
+            signal.signal(
+                signal.SIGTERM, lambda s, f: loop.call_soon_threadsafe(handle_signal, s)
+            )
         else:
             loop.add_signal_handler(signal.SIGINT, lambda: handle_signal(signal.SIGINT))
-            loop.add_signal_handler(signal.SIGTERM, lambda: handle_signal(signal.SIGTERM))
+            loop.add_signal_handler(
+                signal.SIGTERM, lambda: handle_signal(signal.SIGTERM)
+            )
     except Exception as e:
         logger.warning(f"Signals setup failed: {e}")
 
@@ -111,7 +124,7 @@ async def main() -> None:
 
     logger.info("Successfully connected to Telegram!")
 
-    target_chat_id = os.getenv('TARGET_CHAT_ID')
+    target_chat_id = os.getenv("TARGET_CHAT_ID")
 
     # Start autonomous 24/7 mode
     logger.info("🚀 Starting autonomous 24/7 mode...")
