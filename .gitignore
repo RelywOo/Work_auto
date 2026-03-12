@@ -19,7 +19,7 @@ output/
 *.db-shm
 *.db-wal
 *.sqlite3
-*.txt
+#*.txt
 
 # Тесты и покрытие кода
 .pytest_cache/
@@ -43,4 +43,3 @@ desktop.ini
 
 .claude
 check_models.py
-AI improve ideais
