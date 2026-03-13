@@ -1,10 +1,44 @@
+# Git
 .git
+
+# Python cache
 __pycache__
 *.pyc
+*.py[cod]
+
+# Secrets and data
 .env
 bot_memory.db*
-tests/
+*.db-shm
+*.db-wal
 *.session
+*.session-journal
+
+# Runtime directories
 logs/
 downloads/
 output/
+healthcheck
+
+# Dev/test files
+tests/
+venv/
+.venv/
+requirements-dev.txt
+pytest.ini
+check_models.py
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDE and tools
+.idea/
+.vscode/
+.claude/
+*.swp
+
+# Misc
+README.md
+work_auto.service
+Thumbs.db
+.DS_Store

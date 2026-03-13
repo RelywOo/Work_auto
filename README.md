@@ -1,105 +1,123 @@
-# Telegram Bot для Автоматической Обработки Отчетов
+# Telegram Bot for Automated Report Processing
 
-Умный Telegram-бот для автоматической обработки отчетов от бригадиров с использованием ИИ-анализа фотографий и организации файлов.
+A smart Telegram bot for automated processing of field crew reports using AI-powered photo analysis and file organization.
 
-## 🚀 Возможности
+## Features
 
-- **🤖 Автономный режим 24/7** - бот работает постоянно и автоматически обрабатывает новые отчеты
-- **⏰ Умный таймер** - ждет завершения загрузки всех файлов от бригадира (5-10 минут)
-- **🎯 Умная фильтрация** - обрабатывает только UA/UB топики, игнорирует административные
-- **📸 ИИ-анализ** - автоматически определяет демонтированное оборудование на фото
-- **📦 Автоматическая упаковка** - создает ZIP-архивы с отсортированными файлами
-- **🔄 Producer-Consumer архитектура** - эффективная обработка множественных топиков
+- **24/7 Autonomous Mode** — runs continuously and processes new reports automatically
+- **Smart Timer** — waits for the crew to finish uploading all files (configurable timeout)
+- **Smart Filtering** — processes only UA/UB topics, ignores administrative and TSS/TSSR ones
+- **Two-Stage AI Analysis** — initial photo classification + outlier re-analysis using series context
+- **VDO Support** — automatic detection of VDO topics and equipment list merging with the main topic
+- **Crash Recovery** — restores unfinished tasks from the database on restart
+- **Producer-Consumer Architecture** — parallel processing of multiple topics via a task queue
+- **Monitoring** — healthcheck system with periodic status reports to Telegram
 
-## Установка
+## Installation
 
-1. Установите зависимости:
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-1. Настройте переменные окружения:
-   - Скопируйте `.env.example` в `.env`
-   - Заполните ваши данные в `.env` файле:
-     - `TELEGRAM_API_ID` - ваш API ID от Telegram
-     - `TELEGRAM_API_HASH` - ваш API Hash от Telegram
-     - `TELEGRAM_PHONE_NUMBER` - ваш номер телефона
-     - `TARGET_CHAT_ID` - ID супергруппы для отслеживания
-     - `GEMINI_API_KEY` - API ключ для Google Gemini (обязательно для ИИ-анализа)
-     - `WAIT_TIME` - время ожидания загрузки (секунд, по умолчанию 300)
-     - `DOWNLOADS_DIR` - папка для загрузок (по умолчанию 'downloads')
-     - `SESSION_FILE` - имя файла сессии (по умолчанию 'session_name.session')
+1. Copy `.env.example` to `.env` and fill in the environment variables:
 
-## 🎯 Запуск
+| Variable | Required | Description | Default |
+| --- | --- | --- | --- |
+| `TELEGRAM_API_ID` | yes | API ID from [my.telegram.org](https://my.telegram.org) | — |
+| `TELEGRAM_API_HASH` | yes | API Hash from Telegram | — |
+| `TELEGRAM_PHONE_NUMBER` | yes | Phone number for authentication | — |
+| `TARGET_CHAT_ID` | yes | Target supergroup ID | — |
+| `GEMINI_API_KEY` | yes | API key from [Google AI Studio](https://aistudio.google.com) | — |
+| `WAIT_TIME` | no | Upload wait time (seconds) | `300` |
+| `MAX_WORKERS` | no | Number of parallel workers (1–8) | `2` |
+| `GEMINI_MODEL` | no | Gemini model for analysis | `gemini-flash-latest` |
+| `DB_PATH` | no | Path to SQLite database | `bot_memory.db` |
+| `HEALTHCHECK_INTERVAL` | no | Telegram report interval (seconds) | `3600` |
+| `DOWNLOADS_DIR` | no | Temporary downloads directory | `downloads` |
+| `SESSION_FILE` | no | Telethon session file | `session_name.session` |
 
-### Использование Docker (Рекомендуется для сервера)
+## Running
 
-Самый простой и надежный способ запустить бота — использовать Docker:
+### Docker (recommended for production)
 
 ```bash
-# 1. Сборка и запуск в фоновом режиме
+# Build and start in the background
 docker-compose up -d --build
 
-# 2. Просмотр логов
+# View logs
 docker logs -f work_auto_bot
+
+# Stop
+docker-compose down
 ```
 
-_Примечание: при первом запуске может потребоваться запустить контейнер интерактивно (`docker-compose run -it bot`), чтобы ввести код из Telegram или 2FA пароль. В дальнейшем сессия будет сохраняться._
+> On the first run you may need to start the container interactively (`docker-compose run -it bot`) to enter the Telegram verification code or 2FA password. The session is persisted for subsequent runs.
 
-### Автономный локальный режим
+Docker container includes:
 
-Если вы запускаете бота локально без Docker:
+- Health checks every 60 seconds
+- Memory limit 1 GB, CPU limit 1.0
+- Automatic restart (`unless-stopped`)
+- Volume mounts for data persistence
+- Timezone `Europe/Kiev`
+
+### Local
 
 ```bash
 python main.py
 ```
 
-**Как работает:**
+### Systemd Service (Linux)
 
-1. Бот постоянно слушает сообщения в UA/UB топиках
-2. При появлении новой активности запускает таймер (настраивается через `WAIT_TIME`)
-3. Если приходят новые файлы - таймер сбрасывается
-4. После истечения таймера бот скачивает все и запускает ИИ-анализ
-5. Создает ZIP-архив с отсортированными файлами
-6. Обработка происходит в фоновом режиме с очередью задач
+A ready-to-use `work_auto.service` file is provided for systemd deployment.
 
-## 🔧 Фильтрация топиков
+## How It Works
 
-Бот автоматически игнорирует:
+1. The bot continuously listens for messages in UA/UB topics
+2. When new activity is detected, it starts a timer (`WAIT_TIME`)
+3. If new files arrive — the timer resets
+4. Once the timer expires, the bot downloads everything and starts AI analysis
+5. **Stage 1** — classify each photo (dismantling / installation / other)
+6. **Stage 2** — detect outliers in the series and re-analyze them using neighboring photo context
+7. Creates a ZIP archive with sorted files and a README report
+8. For VDO topics — automatically finds the paired topic and merges data
 
-- Топики без "UA" или "UB" в названии
-- Топики с "TSS" или "TSSR" в названии
-- Административные топики ("Общие", "Топливо", "План" и т.д.)
+## Topic Filtering
 
-Обрабатывает только топики типа:
+**Processes** topics with "UA" or "UB" in the title:
 
 - `UA4571 Демонтаж/Монтаж`
 - `UB9999 Оборудование`
-- `UA1234 Отчет`
 
-## 📊 Результаты работы
+**Ignores:**
 
-При обработке отчета бот автоматически:
+- Topics with "TSS" or "TSSR" in the title
+- Administrative topics ("Общие", "Топливо", "План", etc.)
 
-1. Скачивает все фото и текстовые сообщения
-2. Извлекает списки оборудования из текста через ИИ
-3. Анализирует фото через Google Gemini для определения демонтажа
-4. Сортирует файлы по папкам:
-   - `Demontaj/` - демонтированное оборудование
-   - `Montaj/` - смонтированное оборудование
-   - `Other/` - прочие фото
-5. Создает `README.txt` с подробным отчетом
-6. Упаковывает в ZIP-архив с ID сайта
+## Output
 
-## 📁 Структура выходных файлов
+The bot automatically:
+
+1. Downloads all photos and text messages
+2. Extracts equipment lists from text via AI
+3. Analyzes photos through Google Gemini (two-stage process)
+4. Sorts files into folders:
+   - `Demontaj/` — dismantled equipment
+   - `Montaj/` — installed equipment
+   - `Other/` — miscellaneous photos
+5. Generates a `README.txt` with a detailed report
+6. Packages everything into a ZIP archive named by site ID
+
+### Output File Structure
 
 ```text
 output/
-├── UA4571_MAIN.zip     # Архив с основным отчетом
-├── UA4571_VDO.zip      # Архив с отчетом VDO (если есть)
+├── UA4571_MAIN.zip
+├── UA4571_VDO.zip          # if a VDO topic exists
 downloads/
-├── topic_12345/        # Временная папка обработки
+├── topic_12345/            # temporary folder (deleted after processing)
 │   ├── messages_log.txt
 │   ├── README.txt
 │   ├── Demontaj/
@@ -109,83 +127,92 @@ downloads/
 │       └── RRU_5516_photo_125.jpg
 ```
 
-## 🛠️ Конфигурация
+## Project Structure
 
-### Настройка времени ожидания
+```text
+├── main.py                     # entry point (autonomous mode)
+├── requirements.txt            # production dependencies
+├── requirements-dev.txt        # development dependencies
+├── Dockerfile                  # Docker image (Python 3.11-slim)
+├── docker-compose.yml          # Docker Compose configuration
+├── pytest.ini                  # test configuration
+├── work_auto.service           # systemd service
+├── check_models.py             # utility to check available Gemini models
+├── modules/
+│   ├── telegram_client.py      # Telegram client with event-driven architecture
+│   ├── ai_processor.py         # two-stage AI photo analysis
+│   ├── task_queue.py           # task queue (Producer-Consumer)
+│   ├── database.py             # SQLite state persistence
+│   └── utils.py                # utilities (ZIP, README, site ID extraction)
+├── tests/
+│   ├── test_ai_processor.py
+│   ├── test_database.py
+│   ├── test_error_scenarios.py
+│   ├── test_integration_pipeline.py
+│   ├── test_telegram_logic.py
+│   └── test_utils.py
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # CI/CD: ruff + bandit + pytest
+├── logs/                       # rotating logs (5 MB x 5 files)
+├── downloads/                  # temporary processing files
+└── output/                     # final ZIP archives
+```
+
+## Architecture
+
+```text
+Telegram NewMessage Event
+        ↓
+   Topic Timer (resets on new messages)
+        ↓
+   Task Queue (FIFO)
+        ↓
+   Worker Pool (2–8 parallel workers)
+        ↓
+   Pipeline: Download → AI Analysis → Packaging → Delivery
+        ↓
+   SQLite (state persistence)
+```
+
+- **Event-driven** — reacts to new messages in real time
+- **Producer-Consumer** — efficient processing via a task queue
+- **Async/Thread hybrid** — async for Telegram, ThreadPool for AI and file I/O
+- **Persistence** — SQLite (WAL mode) stores processing state and enables crash recovery
+- **Caching** — LRU cache for topic titles (500 entries, 1-hour TTL)
+
+## Development
+
+### Install dev dependencies
 
 ```bash
-# В .env файле
-WAIT_TIME=600  # 10 минут для медленных бригад
+pip install -r requirements-dev.txt
 ```
 
-### Настройка воркеров
+### Run tests
 
-В файле `modules/telegram_client.py` можно изменить количество воркеров для обработки:
-
-```python
-self.task_queue = TaskQueue(max_workers=4, telegram_client=self)  # 4 воркера вместо 2
+```bash
+pytest
 ```
 
-### Отладка
+### CI/CD
 
-Для детального логирования установите уровень DEBUG:
+GitHub Actions runs automatically on push to main and on pull requests:
 
-```python
-logging.basicConfig(level=logging.DEBUG)
-```
+1. **Lint** — `ruff check` (code style)
+2. **Security** — `bandit` (vulnerability scanning)
+3. **Tests** — `pytest` (unit and integration tests)
 
-## 📝 Пример лога работы
+## Logging and Monitoring
 
-```text
-2025-02-23 15:30:15 - INFO - 🚀 Запускаю автономный режим 24/7...
-2025-02-23 15:30:15 - INFO - 🎯 Отслеживаю чат -1001234567890
-2025-02-23 15:30:15 - INFO - ⏰ Время ожидания загрузки: 300 секунд
-2025-02-23 15:30:15 - INFO - 🔍 Фильтрую только UA/UB топики (без TSS/TSSR)
-2025-02-23 15:30:15 - INFO - 🚀 Запускаю Consumer задач (2 воркеров)...
-2025-02-23 15:35:22 - INFO - 🆕 Активность в топике UA4571 (ID: 12345), жду завершения загрузки...
-2025-02-23 15:40:22 - INFO - ⏰ Таймер для топика UA4571 (ID: 12345) истек, начинаю сбор данных
-2025-02-23 15:40:22 - INFO - 📋 Топик UA4571 (ID: 12345) добавлен в очередь обработки
-2025-02-23 15:42:10 - INFO - 🔨 Worker-1 начинает обработку топика UA4571 (ID: 12345)
-2025-02-23 15:42:10 - INFO - ✅ Загрузка топика 12345 завершена: 1 текстов, 15 фото
-2025-02-23 15:42:11 - INFO - 🔧 Найдено оборудования: демонтаж - 3, монтаж - 1
-2025-02-23 15:45:30 - INFO - 📊 Организация файлов: Демонтаж=12, Монтаж=3, Другое=0
-2025-02-23 15:45:31 - INFO - 📦 ZIP-архив создан: output/UA4571_MAIN.zip
-2025-02-23 15:45:31 - INFO - ✅ Worker-1 завершил обработку топика 12345 за 198.3 сек
-2025-02-23 15:45:31 - INFO - 🎉 Обработка топика 12345 завершена успешно!
-```
+- **Log file:** `logs/bot.log` (rotation: 5 MB x 5 files)
+- **Healthcheck:** file updated every 30 seconds (Docker checks every 60 seconds)
+- **Telegram reports:** periodic messages with metrics (processed, errors, timing)
 
-## 🚨 Важные замечания
+## Important Notes
 
-- Убедитесь что у бота есть права на чтение сообщений в целевой группе
-- Для ИИ-анализа требуется действующий `GEMINI_API_KEY`
-- Первичная аутентификация может потребовать ввода кода из Telegram
-- Сессия сохраняется в файле `SESSION_FILE`
-- Бот автоматически обрабатывает множественные топики одновременно
-
-## 📦 Структура проекта
-
-```text
-/
-├── .env              # ваши настройки (не в git)
-├── .env.example      # пример настроек
-├── .gitignore        # git ignore
-├── main.py           # основной файл запуска (автономный режим)
-├── requirements.txt  # зависимости
-└── modules/
-    ├── __init__.py
-    ├── telegram_client.py  # Telegram клиент с event-driven архитектурой
-    ├── ai_processor.py     # ИИ-обработка фотографий
-    ├── task_queue.py       # Очередь задач (Producer-Consumer)
-    └── utils.py           # Общие утилиты
-```
-
-## 🔄 Архитектура
-
-Проект использует современную асинхронную архитектуру:
-
-- **Event-driven подход** - реакция на новые сообщения в реальном времени
-- **Producer-Consumer паттерн** - эффективная обработка через очередь задач
-- **Асинхронная обработка** - одновременная работа с множественными топиками
-- **Модульная структура** - чистый и поддерживаемый код
-
-Это позволяет боту эффективно обрабатывать отчеты от нескольких бригад одновременно без блокировок.
+- Make sure the bot has read access to messages in the target group
+- A valid `GEMINI_API_KEY` is required for AI analysis
+- First-time authentication may require entering a Telegram verification code
+- The session is persisted in `SESSION_FILE`
+- The database (`bot_memory.db`) stores processing progress — do not delete it unnecessarily
