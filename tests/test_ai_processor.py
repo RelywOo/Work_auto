@@ -115,7 +115,10 @@ async def test_extract_equipment_lists_valid_json(
 ):
     """Корректный JSON ответ от Gemini."""
     response_json = json.dumps(
-        {"demontaj": ["Anten T1003", "DCDU12B"], "montaj": ["RRU 5516"]}
+        {
+            "demontaj": ["Anten T1003 — 2 шт", "Кабель силовой 2x10 — 85м", "DCDU12B"],
+            "montaj": ["RRU 5516 — 3 шт"],
+        }
     )
     ai_processor._generate_with_retry = AsyncMock(
         return_value=mock_response(response_json)
@@ -123,8 +126,8 @@ async def test_extract_equipment_lists_valid_json(
 
     result = await ai_processor.extract_equipment_lists(sample_log_file)
 
-    assert result["demontaj"] == ["Anten T1003", "DCDU12B"]
-    assert result["montaj"] == ["RRU 5516"]
+    assert result["demontaj"] == ["Anten T1003 — 2 шт", "Кабель силовой 2x10 — 85м", "DCDU12B"]
+    assert result["montaj"] == ["RRU 5516 — 3 шт"]
 
 
 @pytest.mark.asyncio

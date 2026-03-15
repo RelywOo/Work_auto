@@ -18,7 +18,7 @@ import time
 DEFAULT_WAIT_TIME = 300  # seconds to wait for topic inactivity before processing
 DEFAULT_MAX_WORKERS = 2  # number of parallel processing workers
 TOPIC_CACHE_TTL = 3600  # seconds to cache topic titles (1 hour)
-DEFAULT_PHOTO_LIMIT = 100  # max messages to scan for photos
+DEFAULT_PHOTO_LIMIT = None  # no limit — process all photos in topic
 HEARTBEAT_INTERVAL = 30  # seconds between heartbeat file updates
 DEFAULT_HEALTHCHECK_INTERVAL = 3600  # seconds between Telegram healthcheck reports
 MAX_TOPIC_CACHE_SIZE = 500  # max entries in topic title cache
@@ -199,13 +199,14 @@ class TelegramClientManager:
         )
 
     async def download_topic_content(
-        self, topic_id: int, photo_message_limit: int = 100
+        self, topic_id: int, photo_message_limit: int = None
     ) -> Dict[str, int]:
         """Download all text messages and photos from a specific Telegram topic.
 
         Args:
             topic_id: ID of the topic to download from.
             photo_message_limit: Maximum number of messages to process for photo downloads.
+                                 None means no limit (process all messages).
 
         Returns:
             Dict with counts: {'text_messages': X, 'photos': Y}
@@ -275,7 +276,7 @@ class TelegramClientManager:
 
                 # Handle media content
                 if (
-                    messages_iterated <= photo_message_limit
+                    (photo_message_limit is None or messages_iterated <= photo_message_limit)
                     and message.media
                     and isinstance(message.media, MessageMediaPhoto)
                 ):
@@ -475,7 +476,7 @@ class TelegramClientManager:
 
     @with_retry(max_retries=3)
     async def download_topic_photos_to_dir(
-        self, topic_id: int, target_dir: str, photo_message_limit: int = 100
+        self, topic_id: int, target_dir: str, photo_message_limit: int = None
     ) -> int:
         """Download all photos from a topic directly to a specified directory.
 
@@ -483,6 +484,7 @@ class TelegramClientManager:
             topic_id: ID of the topic to download photos from.
             target_dir: Directory to save photos to.
             photo_message_limit: Maximum number of messages to scan.
+                                 None means no limit (process all messages).
 
         Returns:
             Number of photos downloaded.
@@ -494,7 +496,7 @@ class TelegramClientManager:
 
         async for message in self.client.iter_messages(entity=chat, reply_to=topic_id):
             messages_iterated += 1
-            if messages_iterated > photo_message_limit:
+            if photo_message_limit is not None and messages_iterated > photo_message_limit:
                 break
 
             if message.media and isinstance(message.media, MessageMediaPhoto):

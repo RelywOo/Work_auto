@@ -23,7 +23,7 @@ SEND_FILE_TIMEOUT_PER_MB = 15  # extra seconds per MB of file size
 VDO_SEARCH_TIMEOUT = 30  # max wait for VDO main topic search
 VDO_LOG_TIMEOUT = 120  # max wait for VDO text log download
 GRACEFUL_SHUTDOWN_TIMEOUT = 60  # max wait for workers to finish before force-cancel
-PHOTO_MESSAGE_LIMIT = 100  # max messages to scan for photos
+PHOTO_MESSAGE_LIMIT = None  # no limit — process all photos in topic
 
 
 class TaskQueue:

@@ -24,7 +24,10 @@ def test_create_readme_file(tmp_path):
     topic_dir = tmp_path / "test_topic"
     topic_dir.mkdir()
 
-    equipment_lists = {"demontaj": ["Switch 1", "Router 2"], "montaj": ["Switch 3"]}
+    equipment_lists = {
+        "demontaj": ["Switch 1 — 2 шт", "Кабель силовой 2x10 — 85м"],
+        "montaj": ["Switch 3 — 1 шт"],
+    }
 
     readme_path = create_readme_file(str(topic_dir), equipment_lists)
 
@@ -33,9 +36,10 @@ def test_create_readme_file(tmp_path):
         content = f.read()
 
     assert "ОБОРУДОВАНИЕ НА ДЕМОНТАЖ:" in content
-    assert "- Switch 1" in content
+    assert "- Switch 1 — 2 шт" in content
+    assert "- Кабель силовой 2x10 — 85м" in content
     assert "ОБОРУДОВАНИЕ НА МОНТАЖ:" in content
-    assert "- Switch 3" in content
+    assert "- Switch 3 — 1 шт" in content
     assert "ПОЛНЫЙ ТЕКСТ СООБЩЕНИЯ:" not in content
 
 
